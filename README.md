@@ -1,73 +1,24 @@
-# ビルド方法
+# インストール方法
 
 ```sh
-docker build --no-cache -t yumayo-ai -f Dockerfile .
-```
-
-# 起動前の準備
-
-```sh
-mkdir -p .claude.local
-[ ! -f .claude.local/.claude.json ] && echo '{}' > .claude.local/.claude.json || true
-mkdir -p .claude.local/.claude
+bash install.sh
 ```
 
 # 起動方法
 
 ```sh
-docker run -ti --rm \
---stop-timeout 0 \
---cap-add=NET_ADMIN \
---cap-add=NET_RAW \
---mount type=bind,source="$(pwd)",target=/workspace \
---mount type=tmpfs,target=/workspace/.claude.local,tmpfs-size=0 \
---mount type=bind,source="$(pwd)/.claude.local/.claude",target=/home/ubuntu/.claude \
---mount type=bind,source="$(pwd)/.claude.local/.claude.json",target=/home/ubuntu/.claude.json \
-yumayo-ai \
-bash -ci "claude --dangerously-skip-permissions"
+source .bash_ai_container
+aicontainer
 ```
 
-# よくある使い方
+# .claude.localについて
 
-~/.bash_ai_container に下記を貼り付けます。
+Claude Code ではプロジェクトで使用する.claudeディレクトリがありますが、ユーザーディレクトリにも.claudeディレクトリが作成されます。  
+プロジェクトをまたいで.claudeディレクトリは共有したくないため、.claude.localを生成してそれをマウントすることで、完全にプロジェクトごとに異なる環境でAIコンテナを動作させることができます。
 
-```sh
-#!/bin/bash
+# おすすめ
 
-aicontainer() {
-  mkdir -p .claude.local
-  [ ! -f .claude.local/.claude.json ] && echo '{}' > .claude.local/.claude.json || true
-  mkdir -p .claude.local/.claude
-
-  # .aiignoreの各行を読み込んでtmpfsマウントや/dev/nullにマウントすることで、機密情報へのアクセスをブロックします。
-  AI_IGNORE=""
-  if [ -f .aiignore ]; then
-    while IFS= read -r line || [ -n "$line" ]; do
-      if [ -n "$line" ] && [[ ! "$line" =~ ^[[:space:]]*# ]]; then
-        line="${line#/}"
-        if [ -d "$line" ]; then
-          AI_IGNORE="$AI_IGNORE --mount type=tmpfs,target=/workspace/$line,tmpfs-size=0"
-        elif [ -f "$line" ]; then
-          AI_IGNORE="$AI_IGNORE --mount type=bind,source=/dev/null,target=/workspace/$line,readonly"
-        fi
-        echo ignored. $line
-      fi
-    done < .aiignore
-  fi
-
-  docker run -ti --rm \
-    --stop-timeout 0 \
-    --cap-add=NET_ADMIN \
-    --cap-add=NET_RAW \
-    --mount type=bind,source="$(pwd)",target=/workspace \
-    --mount type=tmpfs,target=/workspace/.claude.local,tmpfs-size=0 \
-    --mount type=bind,source="$(pwd)/.claude.local/.claude",target=/home/ubuntu/.claude \
-    --mount type=bind,source="$(pwd)/.claude.local/.claude.json",target=/home/ubuntu/.claude.json \
-    $AI_IGNORE \
-    yumayo-ai \
-    bash -ci "claude --dangerously-skip-permissions"
-}
-```
+.bash_ai_container を ~/.bash_ai_containerにコピーします。
 
 ~/.bashrc に下記のプログラムを追記します。
 
