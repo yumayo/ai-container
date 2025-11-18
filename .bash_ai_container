@@ -1,69 +1,135 @@
 #!/bin/bash
 
+# 1つのエントリーをAI_IGNOREに追加
+add_ignore_entry() {
+  local host_path="$1"
+  local container_path="$2"
+  local message="$3"
+
+  if [ -d "$host_path" ]; then
+    AI_IGNORE="$AI_IGNORE \\
+    --mount type=tmpfs,target=$container_path,tmpfs-size=0"
+    echo "ignored: $message"
+  elif [ -f "$host_path" ]; then
+    AI_IGNORE="$AI_IGNORE \\
+    --mount type=bind,source=/dev/null,target=$container_path,readonly"
+    echo "ignored: $message"
+  fi
+}
+
+# .aiignoreファイルを処理（base_dirとmount_dstを指定）
+process_aiignore_file() {
+  local aiignore_file="$1"
+  local base_dir="$2"
+  local mount_dst="$3"
+
+  echo "found .aiignore: $aiignore_file"
+
+  local aiignore_dir="$(dirname "$aiignore_file")"
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+
+    # 空行とコメント行をスキップ
+    [ -z "$line" ] && continue
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+
+    # パスの正規化
+    line="${line#/}"
+    local host_full_path="$aiignore_dir/$line"
+
+    # マウント先でのパスを計算
+    local rel_path="${host_full_path#$base_dir}"
+    rel_path="${rel_path#/}"
+    local container_path="$mount_dst/$rel_path"
+
+    add_ignore_entry "$host_full_path" "$container_path" "$container_path"
+  done < "$aiignore_file"
+}
+
+# ディレクトリ内の.aiignoreを再帰的に処理
+find_and_process_aiignores() {
+  local src_dir="$1"
+  local mount_dst="$2"
+
+  while read -r aiignore_file; do
+    process_aiignore_file "$aiignore_file" "$src_dir" "$mount_dst"
+  done < <(find "$src_dir" -name .aiignore -type f)
+}
+
 aicontainer() {
   mkdir -p .claude.local
   [ ! -f .claude.local/.claude.json ] && echo '{}' > .claude.local/.claude.json || true
   mkdir -p .claude.local/.claude
 
-  # .aiignoreの各行を読み込んでtmpfsマウントや/dev/nullにマウントすることで、機密情報へのアクセスをブロックします。
   AI_IGNORE=""
+
+  # ルートの.aiignoreを処理
   if [ -f .aiignore ]; then
     while IFS= read -r line || [ -n "$line" ]; do
-      # CRLF対応: 行末のCR(\r)を削除
       line="${line%$'\r'}"
+      [ -z "$line" ] && continue
+      [[ "$line" =~ ^[[:space:]]*# ]] && continue
 
-      if [ -n "$line" ] && [[ ! "$line" =~ ^[[:space:]]*# ]]; then
-        line="${line#/}"
-        if [ -d "$line" ]; then
-          AI_IGNORE="$AI_IGNORE --mount type=tmpfs,target=/workspace/$line,tmpfs-size=0"
-        elif [ -f "$line" ]; then
-          AI_IGNORE="$AI_IGNORE --mount type=bind,source=/dev/null,target=/workspace/$line,readonly"
-        fi
-        echo ignored. $line
-      fi
+      line="${line#/}"
+      add_ignore_entry "$line" "/workspace/$line" "/workspace/$line"
     done < .aiignore
   fi
 
-  # .aimountの各行を読み込んで追加のマウントコマンドを作成します。
-  # フォーマット: src:dst (コロン区切り、改行コード区切り)
   AI_MOUNT=""
+
+  # .aimountを処理
   if [ -f .aimount ]; then
     while IFS= read -r line || [ -n "$line" ]; do
-      # CRLF対応: 行末のCR(\r)を削除
       line="${line%$'\r'}"
+      [ -z "$line" ] && continue
+      [[ "$line" =~ ^[[:space:]]*# ]] && continue
 
-      if [ -n "$line" ] && [[ ! "$line" =~ ^[[:space:]]*# ]]; then
-        # コロンで分割
-        IFS=':' read -r src dst <<< "$line"
+      IFS=':' read -r src dst <<< "$line"
+      [ -z "$src" ] || [ -z "$dst" ] && continue
 
-        if [ -n "$src" ] && [ -n "$dst" ]; then
-          # srcが相対パスの場合は絶対パスに変換
-          if [[ ! "$src" =~ ^/ ]]; then
-            src="$(pwd)/$src"
-          fi
+      # 相対パスを絶対パスに変換
+      [[ ! "$src" =~ ^/ ]] && src="$(pwd)/$src"
 
-          # srcパス(ファイルまたはディレクトリ)が存在する場合のみマウント
-          if [ -e "$src" ]; then
-            AI_MOUNT="$AI_MOUNT --mount type=bind,source=$src,target=$dst,bind-create-host-path=false"
-            echo "mount: $src -> $dst"
-          else
-            echo "skip mount (not exists): $src"
-          fi
-        fi
+      if [ ! -e "$src" ]; then
+        echo "skip mount (not exists): $src"
+        continue
       fi
+
+      AI_MOUNT="$AI_MOUNT \\
+    --mount type=bind,source=$src,target=$dst"
+      echo "mount: $src -> $dst"
+
+      # マウント元ディレクトリ内の.aiignoreを処理
+      [ -d "$src" ] && find_and_process_aiignores "$src" "$dst"
     done < .aimount
   fi
 
-  docker run -ti --rm \
-    --stop-timeout 0 \
-    --cap-add=NET_ADMIN \
-    --cap-add=NET_RAW \
-    --mount type=bind,source="$(pwd)",target=/workspace \
-    --mount type=tmpfs,target=/workspace/.claude.local,tmpfs-size=0 \
-    --mount type=bind,source="$(pwd)/.claude.local/.claude",target=/home/ubuntu/.claude \
-    --mount type=bind,source="$(pwd)/.claude.local/.claude.json",target=/home/ubuntu/.claude.json \
-    $AI_IGNORE \
-    $AI_MOUNT \
-    yumayo-ai \
-    bash -ci "claude --dangerously-skip-permissions"
+  # 引数チェック
+  local dump_mode=false
+  local cmd="claude --dangerously-skip-permissions"
+
+  if [ "$1" = "dump" ]; then
+    dump_mode=true
+  elif [ -n "$1" ]; then
+    cmd="$1"
+  fi
+
+  # dockerコマンドを構築
+  local docker_cmd="docker run -ti --rm \\
+    --stop-timeout 0 \\
+    --cap-add=NET_ADMIN \\
+    --cap-add=NET_RAW \\
+    --mount type=bind,source=\"$(pwd)\",target=/workspace \\
+    --mount type=tmpfs,target=/workspace/.claude.local,tmpfs-size=0 \\
+    --mount type=bind,source=\"$(pwd)/.claude.local/.claude\",target=/home/ubuntu/.claude \\
+    --mount type=bind,source=\"$(pwd)/.claude.local/.claude.json\",target=/home/ubuntu/.claude.json$AI_MOUNT$AI_IGNORE \\
+    yumayo-ai \\
+    bash -ci \"$cmd\""
+
+  if [ "$dump_mode" = true ]; then
+    echo "$docker_cmd"
+  else
+    eval "$docker_cmd"
+  fi
 }
