@@ -1,24 +1,32 @@
 #!/bin/bash
 
 # 1つのエントリーをAI_IGNOREに追加
-add_ignore_entry() {
+__aicontainer_add_ignore_entry() {
   local host_path="$1"
   local container_path="$2"
   local message="$3"
 
+  # 重複チェック
+  if [ -n "${AI_IGNORE_PATHS[$container_path]}" ]; then
+    echo "ignored (already): $message"
+    return
+  fi
+
   if [ -d "$host_path" ]; then
     AI_IGNORE="$AI_IGNORE \\
     --mount type=tmpfs,target=$container_path,tmpfs-size=0"
+    AI_IGNORE_PATHS[$container_path]=1
     echo "ignored: $message"
   elif [ -f "$host_path" ]; then
     AI_IGNORE="$AI_IGNORE \\
     --mount type=bind,source=/dev/null,target=$container_path,readonly"
+    AI_IGNORE_PATHS[$container_path]=1
     echo "ignored: $message"
   fi
 }
 
 # .aiignoreファイルを処理（base_dirとmount_dstを指定）
-process_aiignore_file() {
+__aicontainer_process_aiignore_file() {
   local aiignore_file="$1"
   local base_dir="$2"
   local mount_dst="$3"
@@ -31,8 +39,12 @@ process_aiignore_file() {
     line="${line%$'\r'}"
 
     # 空行とコメント行をスキップ
-    [ -z "$line" ] && continue
-    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    if [ -z "$line" ]; then
+      continue
+    fi
+    if [[ "$line" =~ ^[[:space:]]*# ]]; then
+      continue
+    fi
 
     # パスの正規化
     line="${line#/}"
@@ -43,17 +55,17 @@ process_aiignore_file() {
     rel_path="${rel_path#/}"
     local container_path="$mount_dst/$rel_path"
 
-    add_ignore_entry "$host_full_path" "$container_path" "$container_path"
+    __aicontainer_add_ignore_entry "$host_full_path" "$container_path" "$container_path"
   done < "$aiignore_file"
 }
 
 # ディレクトリ内の.aiignoreを再帰的に処理
-find_and_process_aiignores() {
+__aicontainer_find_and_process_aiignores() {
   local src_dir="$1"
   local mount_dst="$2"
 
   while read -r aiignore_file; do
-    process_aiignore_file "$aiignore_file" "$src_dir" "$mount_dst"
+    __aicontainer_process_aiignore_file "$aiignore_file" "$src_dir" "$mount_dst"
   done < <(find "$src_dir" -name .aiignore -type f)
 }
 
@@ -63,16 +75,21 @@ aicontainer() {
   mkdir -p .claude.local/.claude
 
   AI_IGNORE=""
+  declare -A AI_IGNORE_PATHS
 
   # ルートの.aiignoreを処理
   if [ -f .aiignore ]; then
     while IFS= read -r line || [ -n "$line" ]; do
       line="${line%$'\r'}"
-      [ -z "$line" ] && continue
-      [[ "$line" =~ ^[[:space:]]*# ]] && continue
+      if [ -z "$line" ]; then
+        continue
+      fi
+      if [[ "$line" =~ ^[[:space:]]*# ]]; then
+        continue
+      fi
 
       line="${line#/}"
-      add_ignore_entry "$line" "/workspace/$line" "/workspace/$line"
+      __aicontainer_add_ignore_entry "$line" "/workspace/$line" "/workspace/$line"
     done < .aiignore
   fi
 
@@ -82,13 +99,20 @@ aicontainer() {
   if [ -f .aimount ]; then
     while IFS= read -r line || [ -n "$line" ]; do
       line="${line%$'\r'}"
-      [ -z "$line" ] && continue
-      [[ "$line" =~ ^[[:space:]]*# ]] && continue
+      if [ -z "$line" ]; then
+        continue
+      fi
+      if [[ "$line" =~ ^[[:space:]]*# ]]; then
+        continue
+      fi
 
       IFS=':' read -r src dst <<< "$line"
-      [ -z "$src" ] || [ -z "$dst" ] && continue
+      if [ -z "$src" ] || [ -z "$dst" ]; then
+        echo "skip mount (invalid format): $line"
+        continue
+      fi
 
-      # 相対パスを絶対パスに変換
+      # 相対パスを絶対パスに変換し、パスを正規化
       [[ ! "$src" =~ ^/ ]] && src="$(pwd)/$src"
 
       if [ ! -e "$src" ]; then
@@ -96,12 +120,14 @@ aicontainer() {
         continue
       fi
 
+      src="$(realpath "$src")"
+
       AI_MOUNT="$AI_MOUNT \\
     --mount type=bind,source=$src,target=$dst"
       echo "mount: $src -> $dst"
 
       # マウント元ディレクトリ内の.aiignoreを処理
-      [ -d "$src" ] && find_and_process_aiignores "$src" "$dst"
+      [ -d "$src" ] && __aicontainer_find_and_process_aiignores "$src" "$dst"
     done < .aimount
   fi
 
