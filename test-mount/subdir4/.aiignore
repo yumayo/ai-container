@@ -1,0 +1,9 @@
+# サブディレクトリの機密ファイル
+subsubdir1/secret.txt
+
+# サブディレクトリの機密ファイル
+# 親と重複している
+subsubdir2/secret.txt
+
+# ファイルを除外
+secret.txt

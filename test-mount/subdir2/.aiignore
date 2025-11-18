@@ -1,0 +1,9 @@
+# サブディレクトリの機密ファイル
+subsubdir1/secret.txt
+
+# サブディレクトリ自体を除外
+# 親に除外を任せてみる
+# subsubdir2
+
+# ファイルを除外
+secret.txt

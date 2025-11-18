@@ -1,0 +1,14 @@
+# ルートレベルの機密ファイル
+secret.txt
+
+# ディレクトリ全体を除外（子・孫ファイルも含む）
+subdir1
+
+# 孫のファイルを個別に指定して除外する
+subdir2/subsubdir2/secret.txt
+
+# 子では除外していないため、親側でのみ除外している
+subdir3
+
+# 子と重複している
+subdir4/subsubdir2/secret.txt

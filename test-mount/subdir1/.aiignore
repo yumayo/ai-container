@@ -1,0 +1,10 @@
+# 親にこのディレクトリ自体を除外されているため、public.txtも除外対象なはず
+
+# サブディレクトリの機密ファイル
+subsubdir1/secret.txt
+
+# サブディレクトリ自体を除外
+subsubdir2
+
+# ファイルを除外
+secret.txt
