@@ -140,6 +140,7 @@ aicontainer() {
   # dockerコマンドを構築
   local docker_cmd="docker run -ti --rm \\
     --stop-timeout 0 \\
+    --network yumayo-ai \\
     --cap-add=NET_ADMIN \\
     --cap-add=NET_RAW \\
     --mount type=bind,source=\"$(pwd)\",target=/workspace \\
