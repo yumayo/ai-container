@@ -93,10 +93,19 @@ aicontainer() {
         continue
       fi
 
-      IFS=':' read -r src dst <<< "$line"
+      # 先に環境変数を展開してから:で分割
+      local expanded_line
+      if ! expanded_line="$(eval echo "$line" 2>&1)"; then
+        echo "Error: environment variable error: $line" >&2
+        echo "  $expanded_line" >&2
+        return 1
+      fi
+
+      # 展開後の行を:で分割
+      IFS=':' read -r src dst <<< "$expanded_line"
       if [ -z "$src" ] || [ -z "$dst" ]; then
-        echo "skip mount (invalid format): $line"
-        continue
+        echo "Error: invalid format (expected 'src:dst'): $line" >&2
+        return 1
       fi
 
       # 相対パスを絶対パスに変換し、パスを正規化
@@ -104,7 +113,7 @@ aicontainer() {
 
       if [ ! -e "$src" ]; then
         echo "skip mount (not exists): $src"
-        continue
+        return 1
       fi
 
       src="$(realpath "$src")"
