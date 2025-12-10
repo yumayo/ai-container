@@ -11,8 +11,8 @@ ENV TERM=xterm-256color
 ENV LANG=ja_JP.UTF-8
 ENV TZ=Asia/Tokyo
 
-# ubuntuユーザーにパスワードを設定
-RUN echo "ubuntu:ubuntu" | chpasswd
+# ubuntuユーザーをsudoグループから明示的に削除してsudo実行を防止
+RUN gpasswd -d ubuntu sudo
 
 # ubuntuユーザーのホームディレクトリに.hushloginファイルを作成してMOTDを抑制
 # .hushloginファイルが無いと下記のメッセージが表示されます。
