@@ -3,7 +3,7 @@
 
 # 環境変数を使った例（通常の展開）
 $HOME/.bashrc:/test/test-bashrc
-${PWD}:/test/test-env-mount
+${TEST_ENV_MOUNT}:/test/test-env-mount
 
 # エラーを発生させる例（未定義の環境変数）
 # 以下のコメントを外すと、環境変数が未定義の場合にエラーが発生します
