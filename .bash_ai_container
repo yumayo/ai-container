@@ -74,6 +74,32 @@ aicontainer() {
   [ ! -f .claude.local/.claude.json ] && echo '{}' > .claude.local/.claude.json || true
   mkdir -p .claude.local/.claude
 
+  # .envファイルを読み込んで環境変数として設定（docker-compose.ymlと同様の挙動）
+  if [ -f .env ]; then
+    echo "found .env: loading environment variables..."
+    while IFS= read -r line || [ -n "$line" ]; do
+      # CRを除去
+      line="${line%$'\r'}"
+      # 空行をスキップ
+      [ -z "$line" ] && continue
+      # コメント行をスキップ
+      [[ "$line" =~ ^[[:space:]]*# ]] && continue
+      # 空白のみの行をスキップ
+      [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+      # KEY=VALUE形式かチェック
+      if [[ "$line" =~ ^[[:space:]]*([a-zA-Z_][a-zA-Z0-9_]*)[[:space:]]*=[[:space:]]*(.*)[[:space:]]*$ ]]; then
+        local key="${BASH_REMATCH[1]}"
+        local value="${BASH_REMATCH[2]}"
+        # 値のクォートを除去（シングル/ダブル）
+        if [[ "$value" =~ ^\"(.*)\"$ ]] || [[ "$value" =~ ^\'(.*)\'$ ]]; then
+          value="${BASH_REMATCH[1]}"
+        fi
+        export "$key=$value"
+        echo "  loaded: $key"
+      fi
+    done < .env
+  fi
+
   AI_IGNORE=""
   declare -A AI_IGNORE_PATHS
 
