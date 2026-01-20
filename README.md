@@ -232,3 +232,15 @@ fi
 ```
 
 以降は、aicontainerとコマンドを実行することで、任意の場所でaiコンテナを起動することができます。
+
+# Ollamaで動かす
+
+別リポジトリの docker compose up -d を先に実行してください。  
+https://github.com/yumayo/nginx-open-webui-ollama
+
+あとは以下のコマンドで実行可能です。  
+こちらは.claude.ollamaディレクトリが作成されます。
+
+```sh
+aicontainer ollama gpt-oss:20b
+```
