@@ -70,9 +70,15 @@ __aicontainer_find_and_process_aiignores() {
 }
 
 aicontainer() {
-  mkdir -p .claude.local
-  [ ! -f .claude.local/.claude.json ] && echo '{}' > .claude.local/.claude.json || true
-  mkdir -p .claude.local/.claude
+  # ollamaモードかどうかでディレクトリを決定
+  local claude_dir=".claude.local"
+  if [ "$1" = "ollama" ]; then
+    claude_dir=".claude.ollama"
+  fi
+
+  mkdir -p "$claude_dir"
+  [ ! -f "$claude_dir/.claude.json" ] && echo '{}' > "$claude_dir/.claude.json" || true
+  mkdir -p "$claude_dir/.claude"
 
   # .envファイルを読み込んで環境変数として設定（docker-compose.ymlと同様の挙動）
   if [ -f .env ]; then
@@ -156,9 +162,27 @@ aicontainer() {
   # 引数チェック
   local dump_mode=false
   local cmd="claude --dangerously-skip-permissions"
+  local network="yumayo-ai"
+  local extra_env=""
+  local extra_opts="--cap-add=NET_ADMIN --cap-add=NET_RAW"
+  local shell_prefix="bash"
 
   if [ "$1" = "dump" ]; then
     dump_mode=true
+  elif [ "$1" = "ollama" ]; then
+    local model="${2:-}"
+    if [ -z "$model" ]; then
+      echo "Error: model name required. Usage: aicontainer ollama <model>" >&2
+      return 1
+    fi
+    cmd="claude --dangerously-skip-permissions --model $model"
+    extra_env="-e ANTHROPIC_AUTH_TOKEN=ollama -e ANTHROPIC_BASE_URL=http://ollama:11434"
+    # https://github.com/yumayo/nginx-open-webui-ollama
+    # ネットワークを切り替えています。
+    # 完全ローカルで動作させるため、ollamaコンテナで動作させます。
+    network="nginx-open-webui-ollama_internal_net"
+    extra_opts="--entrypoint bash"
+    shell_prefix=""
   elif [ -n "$1" ]; then
     cmd="$1"
   fi
@@ -166,15 +190,15 @@ aicontainer() {
   # dockerコマンドを構築
   local docker_cmd="docker run -ti --rm \\
     --stop-timeout 0 \\
-    --network yumayo-ai \\
-    --cap-add=NET_ADMIN \\
-    --cap-add=NET_RAW \\
+    --network $network \\
+    $extra_env \\
+    $extra_opts \\
     --mount type=bind,source=\"$(pwd)\",target=/workspace \\
-    --mount type=tmpfs,target=/workspace/.claude.local,tmpfs-size=0 \\
-    --mount type=bind,source=\"$(pwd)/.claude.local/.claude\",target=/home/ubuntu/.claude \\
-    --mount type=bind,source=\"$(pwd)/.claude.local/.claude.json\",target=/home/ubuntu/.claude.json$AI_MOUNT$AI_IGNORE \\
+    --mount type=tmpfs,target=/workspace/$claude_dir,tmpfs-size=0 \\
+    --mount type=bind,source=\"$(pwd)/$claude_dir/.claude\",target=/home/ubuntu/.claude \\
+    --mount type=bind,source=\"$(pwd)/$claude_dir/.claude.json\",target=/home/ubuntu/.claude.json$AI_MOUNT$AI_IGNORE \\
     yumayo-ai \\
-    bash -ci \"$cmd\""
+    $shell_prefix -ci \"$cmd\""
 
   if [ "$dump_mode" = true ]; then
     echo "$docker_cmd"
