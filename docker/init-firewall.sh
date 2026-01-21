@@ -5,6 +5,27 @@
 set -euo pipefail  # Exit on error, undefined vars, and pipeline failures
 IFS=$'\n\t'       # Stricter word splitting
 
+# モード引数の処理（デフォルト: claude）
+MODE="${1:-claude}"
+
+case "$MODE" in
+    claude)
+        ALLOWED_DOMAINS=("api.anthropic.com")
+        ;;
+    codex)
+        # ChatGPTサブスク利用時: chatgpt.com + 認証系
+        # APIキー利用時: api.openai.com
+        ALLOWED_DOMAINS=("api.openai.com" "chatgpt.com" "auth0.openai.com" "auth.openai.com")
+        ;;
+    *)
+        echo "ERROR: Unknown mode '$MODE'. Use 'claude' or 'codex'"
+        exit 1
+        ;;
+esac
+
+echo "Firewall mode: $MODE"
+echo "Allowed domains: ${ALLOWED_DOMAINS[*]}"
+
 # 1. Extract Docker DNS info BEFORE any flushing
 DOCKER_DNS_RULES=$(iptables-save -t nat | grep "127\.0\.0\.11" || true)
 
@@ -43,16 +64,15 @@ iptables -A OUTPUT -o lo -j ACCEPT
 # Create ipset with CIDR support
 ipset create allowed-domains hash:net
 
-# Resolve and add other allowed domains
-for domain in \
-    "api.anthropic.com"; do
+# Resolve and add allowed domains
+for domain in "${ALLOWED_DOMAINS[@]}"; do
     echo "Resolving $domain..."
     ips=$(dig +noall +answer A "$domain" | awk '$4 == "A" {print $5}')
     if [ -z "$ips" ]; then
         echo "ERROR: Failed to resolve $domain"
         exit 1
     fi
-    
+
     while read -r ip; do
         if [[ ! "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
             echo "ERROR: Invalid IP from DNS for $domain: $ip"
@@ -94,6 +114,8 @@ iptables -A OUTPUT -j REJECT --reject-with icmp-admin-prohibited
 
 echo "Firewall configuration complete"
 echo "Verifying firewall rules..."
+
+# 許可されていないドメインへのアクセスが拒否されることを確認
 if curl --connect-timeout 5 https://example.com >/dev/null 2>&1; then
     echo "ERROR: Firewall verification failed - was able to reach https://example.com"
     exit 1
@@ -101,9 +123,11 @@ else
     echo "Firewall verification passed - unable to reach https://example.com as expected"
 fi
 
-if ! curl --connect-timeout 5 https://api.anthropic.com >/dev/null 2>&1; then
-    echo "ERROR: Firewall verification failed - unable to reach https://api.anthropic.com"
+# 許可されたドメインへのアクセスを確認
+VERIFY_DOMAIN="${ALLOWED_DOMAINS[0]}"
+if ! curl --connect-timeout 5 "https://$VERIFY_DOMAIN" >/dev/null 2>&1; then
+    echo "ERROR: Firewall verification failed - unable to reach https://$VERIFY_DOMAIN"
     exit 1
 else
-    echo "Firewall verification passed - able to reach https://api.anthropic.com as expected"
+    echo "Firewall verification passed - able to reach https://$VERIFY_DOMAIN as expected"
 fi

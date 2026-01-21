@@ -65,9 +65,17 @@ echo ""
 
 # Step 2: Dockerイメージのビルド
 print_step "Step 2/2: Building Docker image 'yumayo-ai'..."
-print_info "This may take a few minutes..."
 
-if (cd docker && docker build --no-cache -t yumayo-ai -f Dockerfile .); then
+# rebuildオプションが指定された場合のみ--no-cacheを使用
+BUILD_OPTS=""
+if [ "$1" = "rebuild" ]; then
+    BUILD_OPTS="--no-cache"
+    print_info "Rebuilding without cache..."
+else
+    print_info "Building with cache (use 'rebuild' argument for no-cache)..."
+fi
+
+if (cd docker && docker build $BUILD_OPTS -t yumayo-ai -f Dockerfile .); then
     echo ""
     print_success "Docker image 'yumayo-ai' built successfully"
 else

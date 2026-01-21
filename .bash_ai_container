@@ -70,15 +70,19 @@ __aicontainer_find_and_process_aiignores() {
 }
 
 aicontainer() {
-  # ollamaモードかどうかでディレクトリを決定
-  local claude_dir=".claude.local"
+  # モードに応じてディレクトリを決定
+  local ai_dir=".claude.local"
   if [ "$1" = "ollama" ]; then
-    claude_dir=".claude.ollama"
+    ai_dir=".claude.ollama"
+  elif [ "$1" = "codex" ]; then
+    ai_dir=".codex.local"
   fi
 
-  mkdir -p "$claude_dir"
-  [ ! -f "$claude_dir/.claude.json" ] && echo '{}' > "$claude_dir/.claude.json" || true
-  mkdir -p "$claude_dir/.claude"
+  mkdir -p "$ai_dir"
+  if [ "$1" != "codex" ]; then
+    [ ! -f "$ai_dir/.claude.json" ] && echo '{}' > "$ai_dir/.claude.json" || true
+    mkdir -p "$ai_dir/.claude"
+  fi
 
   # .envファイルを読み込んで環境変数として設定（docker-compose.ymlと同様の挙動）
   if [ -f .env ]; then
@@ -183,20 +187,39 @@ aicontainer() {
     network="nginx-open-webui-ollama_internal_net"
     extra_opts="--entrypoint bash"
     shell_prefix=""
+  elif [ "$1" = "codex" ]; then
+    # codex-cli (OpenAI Codex CLI)
+    # 認証方法:
+    #   1. ChatGPTアカウントでサインイン（Plus/Pro/Business/Enterprise契約者）
+    #   2. OPENAI_API_KEYで認証（従量課金）
+    # 初回起動時にcodex側でサインインを求められます
+    cmd="codex --full-auto"
+    extra_env="-e FIREWALL_MODE=codex"
+    if [ -n "$OPENAI_API_KEY" ]; then
+      extra_env="$extra_env -e OPENAI_API_KEY=$OPENAI_API_KEY"
+    fi
   elif [ -n "$1" ]; then
     cmd="$1"
   fi
 
   # dockerコマンドを構築
+  local session_mounts=""
+  if [ "$1" = "codex" ]; then
+    session_mounts="--mount type=tmpfs,target=/workspace/$ai_dir,tmpfs-size=0 \\
+    --mount type=bind,source=\"$(pwd)/$ai_dir\",target=/home/ubuntu/.codex"
+  else
+    session_mounts="--mount type=tmpfs,target=/workspace/$ai_dir,tmpfs-size=0 \\
+    --mount type=bind,source=\"$(pwd)/$ai_dir/.claude\",target=/home/ubuntu/.claude \\
+    --mount type=bind,source=\"$(pwd)/$ai_dir/.claude.json\",target=/home/ubuntu/.claude.json"
+  fi
+
   local docker_cmd="docker run -ti --rm \\
     --stop-timeout 0 \\
     --network $network \\
     $extra_env \\
     $extra_opts \\
     --mount type=bind,source=\"$(pwd)\",target=/workspace \\
-    --mount type=tmpfs,target=/workspace/$claude_dir,tmpfs-size=0 \\
-    --mount type=bind,source=\"$(pwd)/$claude_dir/.claude\",target=/home/ubuntu/.claude \\
-    --mount type=bind,source=\"$(pwd)/$claude_dir/.claude.json\",target=/home/ubuntu/.claude.json$AI_MOUNT$AI_IGNORE \\
+    $session_mounts$AI_MOUNT$AI_IGNORE \\
     yumayo-ai \\
     $shell_prefix -ci \"$cmd\""
 

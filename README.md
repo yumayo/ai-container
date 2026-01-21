@@ -11,10 +11,37 @@ source .bash_ai_container
 aicontainer
 ```
 
-# .claude.localについて
+# aicontainerの使い方（3パターン）
 
-Claude Code ではプロジェクトで使用する.claudeディレクトリがありますが、ユーザーディレクトリにも.claudeディレクトリが作成されます。
-プロジェクトをまたいで.claudeディレクトリは共有したくないため、.claude.localを生成してそれをマウントすることで、完全にプロジェクトごとに異なる環境でAIコンテナを動作させることができます。
+このリポジトリでは、用途に応じて以下の3つの起動方法があります。
+
+```sh
+# 1) Claude Code（デフォルト）
+aicontainer
+
+# 2) Codex CLI
+aicontainer codex
+
+# 3) Claude Code + Ollama
+aicontainer ollama gpt-oss:20b
+```
+
+それぞれの用途は以下の通りです。
+
+- `aicontainer`：Claude Code を起動します（.claude.local を使用）
+- `aicontainer codex`：Codex CLI を起動します（.codex.local を使用）
+- `aicontainer ollama gpt-oss:20b`：Claude Code を Ollama 経由でモデルを起動します（.claude.ollama を使用）
+
+# AIが使用する記憶領域について
+
+このリポジトリでは、AIが使用する記憶領域（認証情報やチャット履歴など）をプロジェクトごとに分離します。
+用途に応じて以下のディレクトリが作成され、コンテナ内にマウントされます。
+
+- `.claude.local`：Claude Code 用の記憶領域
+- `.claude.ollama`：Claude Code + Ollama 用の記憶領域
+- `.codex.local`：Codex CLI 用の記憶領域
+
+それぞれの領域を分離することで、プロジェクト間で状態や認証情報が混ざらないようにしています。
 
 # .aiignoreについて
 
