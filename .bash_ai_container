@@ -113,8 +113,8 @@ aicontainer() {
   AI_IGNORE=""
   declare -A AI_IGNORE_PATHS
 
-  # デフォルトの/workspaceマウント配下の.aiignoreを再帰的に処理
-  __aicontainer_find_and_process_aiignores "." "/workspace"
+  # デフォルトのマウント配下の.aiignoreを再帰的に処理
+  __aicontainer_find_and_process_aiignores "." "$(pwd)"
 
   AI_MOUNT=""
 
@@ -203,22 +203,24 @@ aicontainer() {
   fi
 
   # dockerコマンドを構築
+  local workdir="$(pwd)"
   local session_mounts=""
   if [ "$1" = "codex" ]; then
-    session_mounts="--mount type=tmpfs,target=/workspace/$ai_dir,tmpfs-size=0 \\
-    --mount type=bind,source=\"$(pwd)/$ai_dir\",target=/home/ubuntu/.codex"
+    session_mounts="--mount type=tmpfs,target=$workdir/$ai_dir,tmpfs-size=0 \\
+    --mount type=bind,source=\"$workdir/$ai_dir\",target=/home/ubuntu/.codex"
   else
-    session_mounts="--mount type=tmpfs,target=/workspace/$ai_dir,tmpfs-size=0 \\
-    --mount type=bind,source=\"$(pwd)/$ai_dir/.claude\",target=/home/ubuntu/.claude \\
-    --mount type=bind,source=\"$(pwd)/$ai_dir/.claude.json\",target=/home/ubuntu/.claude.json"
+    session_mounts="--mount type=tmpfs,target=$workdir/$ai_dir,tmpfs-size=0 \\
+    --mount type=bind,source=\"$workdir/$ai_dir/.claude\",target=/home/ubuntu/.claude \\
+    --mount type=bind,source=\"$workdir/$ai_dir/.claude.json\",target=/home/ubuntu/.claude.json"
   fi
 
   local docker_cmd="docker run -ti --rm \\
     --stop-timeout 0 \\
     --network $network \\
+    -w \"$workdir\" \\
     $extra_env \\
     $extra_opts \\
-    --mount type=bind,source=\"$(pwd)\",target=/workspace \\
+    --mount type=bind,source=\"$workdir\",target=\"$workdir\" \\
     $session_mounts$AI_MOUNT$AI_IGNORE \\
     yumayo-ai \\
     $shell_prefix -ci \"$cmd\""
