@@ -3,7 +3,7 @@ FROM ubuntu:24.04
 RUN apt-get update -y
 RUN apt-get upgrade -y
 
-RUN apt-get install -y sudo vim locales curl wget iputils-ping iptables ipset dnsutils jq iproute2 git
+RUN apt-get install -y sudo vim locales curl wget iputils-ping iptables ipset dnsutils jq iproute2 git ffmpeg
 
 # dockerコンテナ内で日本語が入力できないため設定します。
 RUN locale-gen ja_JP.UTF-8
