@@ -11,6 +11,10 @@ ENV TERM=xterm-256color
 ENV LANG=ja_JP.UTF-8
 ENV TZ=Asia/Tokyo
 
+ENV DISABLE_TELEMETRY=1
+ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+ENV DISABLE_AUTOUPDATER=true
+
 # ubuntuユーザーをsudoグループから明示的に削除してsudo実行を防止
 RUN gpasswd -d ubuntu sudo
 
