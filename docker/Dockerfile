@@ -32,7 +32,8 @@ nvm alias default 24 && \
 npm install -g npm \
 "
 
-RUN bash -c "source $HOME/.nvm/nvm.sh && npm install -g @anthropic-ai/claude-code"
+RUN curl -fsSL https://claude.ai/install.sh | bash
+RUN echo 'export PATH="$HOME/.local/bin:$PATH"' >> $HOME/.bashrc
 
 # Install OpenAI Codex CLI
 RUN bash -c "source $HOME/.nvm/nvm.sh && npm install -g @openai/codex"
