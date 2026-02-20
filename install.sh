@@ -48,23 +48,8 @@ print_info() {
 # ヘッダー表示
 print_header
 
-# Step 1: Dockerネットワークの作成
-print_step "Step 1/2: Creating Docker network 'yumayo-ai'..."
-if docker network inspect yumayo-ai &>/dev/null; then
-    print_warning "Network 'yumayo-ai' already exists. Skipping..."
-else
-    if docker network create yumayo-ai &>/dev/null; then
-        print_success "Network 'yumayo-ai' created successfully"
-    else
-        print_error "Failed to create network 'yumayo-ai'"
-        exit 1
-    fi
-fi
-
-echo ""
-
-# Step 2: Dockerイメージのビルド
-print_step "Step 2/2: Building Docker image 'yumayo-ai'..."
+# Dockerイメージのビルド
+print_info "Building Docker image 'yumayo-ai'..."
 
 # rebuildオプションが指定された場合のみ--no-cacheを使用
 BUILD_OPTS=""

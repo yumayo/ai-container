@@ -48,30 +48,33 @@ print_info() {
 # ヘッダー表示
 print_header
 
-# Step 1: yumayo-ai ネットワークに接続されているコンテナの停止と削除
-print_step "Step 1/3: Stopping and removing containers on 'yumayo-ai' network..."
-if docker network inspect yumayo-ai &>/dev/null; then
-    CONTAINERS=$(docker network inspect yumayo-ai -f '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null || echo "")
-    if [ -n "$CONTAINERS" ]; then
-        print_info "Found containers: $CONTAINERS"
-        for container in $CONTAINERS; do
-            print_info "Stopping container '$container'..."
-            docker stop "$container" &>/dev/null || true
-            print_info "Removing container '$container'..."
-            docker rm "$container" &>/dev/null || true
-        done
-        print_success "All containers stopped and removed"
-    else
-        print_info "No containers found on 'yumayo-ai' network"
-    fi
+# Step 1: yumayo-ai プレフィックスのネットワークに接続されているコンテナの停止と削除
+print_step "Step 1/4: Stopping and removing containers on 'yumayo-ai*' networks..."
+NETWORKS=$(docker network ls --filter "name=^yumayo-ai" --format '{{.Name}}' 2>/dev/null || echo "")
+if [ -n "$NETWORKS" ]; then
+    for net in $NETWORKS; do
+        CONTAINERS=$(docker network inspect "$net" -f '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null || echo "")
+        if [ -n "$CONTAINERS" ]; then
+            print_info "Network '$net': found containers: $CONTAINERS"
+            for container in $CONTAINERS; do
+                print_info "Stopping container '$container'..."
+                docker stop "$container" &>/dev/null || true
+                print_info "Removing container '$container'..."
+                docker rm "$container" &>/dev/null || true
+            done
+        else
+            print_info "Network '$net': no containers found"
+        fi
+    done
+    print_success "All containers stopped and removed"
 else
-    print_warning "Network 'yumayo-ai' does not exist. Skipping..."
+    print_info "No 'yumayo-ai*' networks found"
 fi
 
 echo ""
 
 # Step 2: Dockerイメージの削除
-print_step "Step 2/3: Removing Docker image 'yumayo-ai'..."
+print_step "Step 2/4: Removing Docker image 'yumayo-ai'..."
 if docker image inspect yumayo-ai &>/dev/null; then
     if docker rmi yumayo-ai &>/dev/null; then
         print_success "Docker image 'yumayo-ai' removed successfully"
@@ -85,18 +88,38 @@ fi
 
 echo ""
 
-# Step 3: Dockerネットワークの削除
-print_step "Step 3/3: Removing Docker network 'yumayo-ai'..."
-if docker network inspect yumayo-ai &>/dev/null; then
-    if docker network rm yumayo-ai &>/dev/null; then
-        print_success "Network 'yumayo-ai' removed successfully"
-    else
-        print_error "Failed to remove network 'yumayo-ai'"
-        print_warning "There might be containers still using this network"
-        exit 1
-    fi
+# Step 3: yumayo-ai プレフィックスのDockerネットワークをすべて削除
+print_step "Step 3/4: Removing Docker networks 'yumayo-ai*'..."
+NETWORKS=$(docker network ls --filter "name=^yumayo-ai" --format '{{.Name}}' 2>/dev/null || echo "")
+if [ -n "$NETWORKS" ]; then
+    for net in $NETWORKS; do
+        if docker network rm "$net" &>/dev/null; then
+            print_success "Network '$net' removed successfully"
+        else
+            print_error "Failed to remove network '$net'"
+            print_warning "There might be containers still using this network"
+        fi
+    done
 else
-    print_warning "Network 'yumayo-ai' does not exist. Skipping..."
+    print_info "No 'yumayo-ai*' networks found"
+fi
+
+echo ""
+
+# Step 4: yumayo-ai プレフィックスのDockerボリュームをすべて削除
+print_step "Step 4/4: Removing Docker volumes 'yumayo-ai*'..."
+VOLUMES=$(docker volume ls --filter "name=^yumayo-ai" --format '{{.Name}}' 2>/dev/null || echo "")
+if [ -n "$VOLUMES" ]; then
+    for vol in $VOLUMES; do
+        if docker volume rm "$vol" &>/dev/null; then
+            print_success "Volume '$vol' removed successfully"
+        else
+            print_error "Failed to remove volume '$vol'"
+            print_warning "There might be containers still using this volume"
+        fi
+    done
+else
+    print_info "No 'yumayo-ai*' volumes found"
 fi
 
 # 完了メッセージ

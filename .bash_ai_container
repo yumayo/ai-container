@@ -69,6 +69,43 @@ __aicontainer_find_and_process_aiignores() {
   done < <(find "$src_dir" -name .aiignore -type f)
 }
 
+# .aicontainerファイルを解析してAICONTAINER_CONFIG連想配列に設定
+__aicontainer_parse_config() {
+  local config_file=".aicontainer"
+
+  if [ ! -f "$config_file" ]; then
+    return
+  fi
+
+  echo "found .aicontainer: loading configuration..."
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    [ -z "$line" ] && continue
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+
+    if [[ "$line" =~ ^[[:space:]]*([a-zA-Z_][a-zA-Z0-9_]*)[[:space:]]*=[[:space:]]*(.*)[[:space:]]*$ ]]; then
+      local key="${BASH_REMATCH[1]}"
+      local value="${BASH_REMATCH[2]}"
+      if [[ "$value" =~ ^\"(.*)\"$ ]] || [[ "$value" =~ ^\'(.*)\'$ ]]; then
+        value="${BASH_REMATCH[1]}"
+      fi
+      AICONTAINER_CONFIG["$key"]="$value"
+      echo "  config: $key=$value"
+    fi
+  done < "$config_file"
+}
+
+# Dockerネットワークが存在しない場合は作成する
+__aicontainer_ensure_network() {
+  local net_name="$1"
+  if ! docker network inspect "$net_name" &>/dev/null; then
+    echo "creating docker network: $net_name"
+    docker network create "$net_name" &>/dev/null || { echo "Error: failed to create network '$net_name'" >&2; return 1; }
+  fi
+}
+
 aicontainer() {
   # モードに応じてディレクトリを決定
   local ai_dir=".claude.local"
@@ -78,10 +115,19 @@ aicontainer() {
     ai_dir=".codex.local"
   fi
 
-  mkdir -p "$ai_dir"
-  if [ "$1" != "codex" ]; then
-    [ ! -f "$ai_dir/.claude.json" ] && echo '{}' > "$ai_dir/.claude.json" || true
-    mkdir -p "$ai_dir/.claude"
+  # .aicontainerの設定を読み込み
+  declare -A AICONTAINER_CONFIG
+  __aicontainer_parse_config
+  local config_network="${AICONTAINER_CONFIG[network]:-}"
+  local config_volume="${AICONTAINER_CONFIG[volume]:-}"
+
+  # ボリュームモードでない場合のみ、ローカルディレクトリを作成
+  if [ -z "$config_volume" ]; then
+    mkdir -p "$ai_dir"
+    if [ "$1" != "codex" ]; then
+      [ ! -f "$ai_dir/.claude.json" ] && echo '{}' > "$ai_dir/.claude.json" || true
+      mkdir -p "$ai_dir/.claude"
+    fi
   fi
 
   # .envファイルを読み込んで環境変数として設定（docker-compose.ymlと同様の挙動）
@@ -166,7 +212,11 @@ aicontainer() {
   # 引数チェック
   local dump_mode=false
   local cmd="claude --dangerously-skip-permissions"
+  # プレフィックス付与: .aicontainer指定時は yumayo-ai-<name>、未指定時は yumayo-ai
   local network="yumayo-ai"
+  if [ -n "$config_network" ]; then
+    network="yumayo-ai-$config_network"
+  fi
   local extra_env=""
   local extra_opts="--cap-add=NET_ADMIN --cap-add=NET_RAW"
   local shell_prefix="bash"
@@ -202,16 +252,35 @@ aicontainer() {
     cmd="$1"
   fi
 
+  # ネットワークが存在しない場合は作成する（dumpモード時はスキップ）
+  if [ "$dump_mode" != true ]; then
+    __aicontainer_ensure_network "$network" || return 1
+  fi
+
   # dockerコマンドを構築
   local workdir="$(pwd)"
   local session_mounts=""
-  if [ "$1" = "codex" ]; then
-    session_mounts="--mount type=tmpfs,target=$workdir/$ai_dir,tmpfs-size=0 \\
-    --mount type=bind,source=\"$workdir/$ai_dir\",target=/home/ubuntu/.codex"
+  local init_cmd=""
+
+  if [ -n "$config_volume" ]; then
+    # ボリュームモード: Docker named volumeを使用
+    local volume_name="yumayo-ai-$config_volume"
+    session_mounts="--mount type=volume,source=$volume_name,target=/home/ubuntu/.ai-session"
+    if [ "$1" = "codex" ]; then
+      init_cmd="mkdir -p /home/ubuntu/.ai-session/$ai_dir; ln -sfn /home/ubuntu/.ai-session/$ai_dir /home/ubuntu/.codex; "
+    else
+      init_cmd="mkdir -p /home/ubuntu/.ai-session/$ai_dir/.claude; [ ! -f /home/ubuntu/.ai-session/$ai_dir/.claude.json ] && echo '{}' > /home/ubuntu/.ai-session/$ai_dir/.claude.json; ln -sfn /home/ubuntu/.ai-session/$ai_dir/.claude /home/ubuntu/.claude; ln -sf /home/ubuntu/.ai-session/$ai_dir/.claude.json /home/ubuntu/.claude.json; "
+    fi
   else
-    session_mounts="--mount type=tmpfs,target=$workdir/$ai_dir,tmpfs-size=0 \\
+    # ディレクトリモード: 従来のローカルディレクトリを使用
+    if [ "$1" = "codex" ]; then
+      session_mounts="--mount type=tmpfs,target=$workdir/$ai_dir,tmpfs-size=0 \\
+    --mount type=bind,source=\"$workdir/$ai_dir\",target=/home/ubuntu/.codex"
+    else
+      session_mounts="--mount type=tmpfs,target=$workdir/$ai_dir,tmpfs-size=0 \\
     --mount type=bind,source=\"$workdir/$ai_dir/.claude\",target=/home/ubuntu/.claude \\
     --mount type=bind,source=\"$workdir/$ai_dir/.claude.json\",target=/home/ubuntu/.claude.json"
+    fi
   fi
 
   local docker_cmd="docker run -ti --rm \\
@@ -223,7 +292,7 @@ aicontainer() {
     --mount type=bind,source=\"$workdir\",target=\"$workdir\" \\
     $session_mounts$AI_MOUNT$AI_IGNORE \\
     yumayo-ai \\
-    $shell_prefix -ci \"$cmd\""
+    $shell_prefix -ci \"${init_cmd}$cmd\""
 
   if [ "$dump_mode" = true ]; then
     echo "$docker_cmd"

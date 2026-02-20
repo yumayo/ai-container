@@ -59,6 +59,9 @@ USER root
 RUN chmod +x /usr/local/bin/entrypoint.sh
 USER ubuntu
 
+# ボリュームマウントポイント（セッション共有用）
+RUN mkdir -p /home/ubuntu/.ai-session
+
 WORKDIR /workspace
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
