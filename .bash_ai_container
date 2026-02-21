@@ -119,14 +119,7 @@ aicontainer() {
   declare -A AICONTAINER_CONFIG
   __aicontainer_parse_config
   local config_network="${AICONTAINER_CONFIG[network]:-}"
-  local config_volume="${AICONTAINER_CONFIG[volume]:-}"
   local config_session="${AICONTAINER_CONFIG[session]:-}"
-
-  # volume と session は排他的
-  if [ -n "$config_volume" ] && [ -n "$config_session" ]; then
-    echo "Error: 'volume' and 'session' cannot both be specified in .aicontainer" >&2
-    return 1
-  fi
 
   # セッションパスの解決（session指定時）
   local session_path=""
@@ -150,7 +143,7 @@ aicontainer() {
       [ ! -f "$session_path/$ai_dir/.claude.json" ] && echo '{}' > "$session_path/$ai_dir/.claude.json" || true
       mkdir -p "$session_path/$ai_dir/.claude"
     fi
-  elif [ -z "$config_volume" ]; then
+  else
     # ディレクトリモード: 従来のローカルディレクトリを作成
     mkdir -p "$ai_dir"
     if [ "$1" != "codex" ]; then
@@ -291,16 +284,7 @@ aicontainer() {
   local session_mounts=""
   local init_cmd=""
 
-  if [ -n "$config_volume" ]; then
-    # ボリュームモード: Docker named volumeを使用
-    local volume_name="yumayo-ai-$config_volume"
-    session_mounts="--mount type=volume,source=$volume_name,target=/home/ubuntu/.ai-session"
-    if [ "$1" = "codex" ]; then
-      init_cmd="mkdir -p /home/ubuntu/.ai-session/$ai_dir; ln -sfn /home/ubuntu/.ai-session/$ai_dir /home/ubuntu/.codex; "
-    else
-      init_cmd="mkdir -p /home/ubuntu/.ai-session/$ai_dir/.claude; [ ! -f /home/ubuntu/.ai-session/$ai_dir/.claude.json ] && echo '{}' > /home/ubuntu/.ai-session/$ai_dir/.claude.json; ln -sfn /home/ubuntu/.ai-session/$ai_dir/.claude /home/ubuntu/.claude; ln -sf /home/ubuntu/.ai-session/$ai_dir/.claude.json /home/ubuntu/.claude.json; "
-    fi
-  elif [ -n "$config_session" ]; then
+  if [ -n "$config_session" ]; then
     # セッションモード: ホストの指定パスをバインドマウント
     if [ "$1" = "codex" ]; then
       session_mounts="--mount type=bind,source=\"$session_path/$ai_dir\",target=/home/ubuntu/.codex"
