@@ -120,9 +120,38 @@ aicontainer() {
   __aicontainer_parse_config
   local config_network="${AICONTAINER_CONFIG[network]:-}"
   local config_volume="${AICONTAINER_CONFIG[volume]:-}"
+  local config_session="${AICONTAINER_CONFIG[session]:-}"
 
-  # ボリュームモードでない場合のみ、ローカルディレクトリを作成
-  if [ -z "$config_volume" ]; then
+  # volume と session は排他的
+  if [ -n "$config_volume" ] && [ -n "$config_session" ]; then
+    echo "Error: 'volume' and 'session' cannot both be specified in .aicontainer" >&2
+    return 1
+  fi
+
+  # セッションパスの解決（session指定時）
+  local session_path=""
+  if [ -n "$config_session" ]; then
+    if [[ "$config_session" =~ ^/ ]]; then
+      session_path="$config_session"
+    else
+      session_path="$(pwd)/$config_session"
+    fi
+    mkdir -p "$session_path"
+    session_path="$(realpath "$session_path")"
+    session_path="${session_path%/}"
+    echo "  session path: $session_path"
+  fi
+
+  # ディレクトリ構造を作成
+  if [ -n "$config_session" ]; then
+    # セッションモード: 指定パスにディレクトリ構造を作成
+    mkdir -p "$session_path/$ai_dir"
+    if [ "$1" != "codex" ]; then
+      [ ! -f "$session_path/$ai_dir/.claude.json" ] && echo '{}' > "$session_path/$ai_dir/.claude.json" || true
+      mkdir -p "$session_path/$ai_dir/.claude"
+    fi
+  elif [ -z "$config_volume" ]; then
+    # ディレクトリモード: 従来のローカルディレクトリを作成
     mkdir -p "$ai_dir"
     if [ "$1" != "codex" ]; then
       [ ! -f "$ai_dir/.claude.json" ] && echo '{}' > "$ai_dir/.claude.json" || true
@@ -271,8 +300,27 @@ aicontainer() {
     else
       init_cmd="mkdir -p /home/ubuntu/.ai-session/$ai_dir/.claude; [ ! -f /home/ubuntu/.ai-session/$ai_dir/.claude.json ] && echo '{}' > /home/ubuntu/.ai-session/$ai_dir/.claude.json; ln -sfn /home/ubuntu/.ai-session/$ai_dir/.claude /home/ubuntu/.claude; ln -sf /home/ubuntu/.ai-session/$ai_dir/.claude.json /home/ubuntu/.claude.json; "
     fi
+  elif [ -n "$config_session" ]; then
+    # セッションモード: ホストの指定パスをバインドマウント
+    if [ "$1" = "codex" ]; then
+      session_mounts="--mount type=bind,source=\"$session_path/$ai_dir\",target=/home/ubuntu/.codex"
+    else
+      session_mounts="--mount type=bind,source=\"$session_path/$ai_dir/.claude\",target=/home/ubuntu/.claude \\
+    --mount type=bind,source=\"$session_path/$ai_dir/.claude.json\",target=/home/ubuntu/.claude.json"
+    fi
+    # セッションパスがワークスペース配下の場合、tmpfsでAIから隠す
+    # ~/.claudeはAIから常にアクセス可能だが、ワークスペース内にセッションディレクトリが
+    # 存在するとlsやfind等でプロジェクトファイルと誤認される可能性がある。
+    # tmpfsで上書きすることで、ワークスペースパス経由の重複アクセスを防ぐ。
+    # ワークスペース外のパスはコンテナ内から見えないため対応不要。
+    if [[ "$session_path/$ai_dir" == "$workdir"* ]]; then
+      session_mounts="--mount type=tmpfs,target=$session_path/$ai_dir,tmpfs-size=0 \\
+    $session_mounts"
+    fi
   else
     # ディレクトリモード: 従来のローカルディレクトリを使用
+    # ワークスペース直下にai_dirが存在するため、AIがプロジェクトファイルと
+    # 誤認しないようtmpfsで隠す（実際のデータは~/.claude等に個別マウント済み）
     if [ "$1" = "codex" ]; then
       session_mounts="--mount type=tmpfs,target=$workdir/$ai_dir,tmpfs-size=0 \\
     --mount type=bind,source=\"$workdir/$ai_dir\",target=/home/ubuntu/.codex"
