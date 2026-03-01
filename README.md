@@ -16,6 +16,13 @@ cp .bash_ai_container ~/.bash_ai_container
 echo 'if [ -f ~/.bash_ai_container ]; then . ~/.bash_ai_container; fi' >> ~/.bashrc
 ```
 
+再ビルドする場合:
+
+```sh
+bash install.sh rebuild      # CLIツール部分のみ再ビルド
+bash install.sh rebuild-all  # ベースイメージ含め全て再ビルド
+```
+
 ## 使い方
 
 ```sh

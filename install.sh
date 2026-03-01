@@ -48,16 +48,32 @@ print_info() {
 # ヘッダー表示
 print_header
 
-# Dockerイメージのビルド
-print_info "Building Docker image 'yumayo-ai'..."
+# ベースイメージのビルド
+print_step "Building base image 'yumayo-ai-base'..."
 
-# rebuildオプションが指定された場合のみ--no-cacheを使用
+BASE_BUILD_OPTS=""
+if [ "$1" = "rebuild-all" ]; then
+    BASE_BUILD_OPTS="--no-cache"
+    print_info "Rebuilding base image without cache..."
+fi
+
+if (cd docker && docker build $BASE_BUILD_OPTS -t yumayo-ai-base -f Dockerfile.base .); then
+    print_success "Base image 'yumayo-ai-base' built successfully"
+else
+    echo ""
+    print_error "Failed to build base image"
+    exit 1
+fi
+
+echo ""
+
+# メインイメージのビルド
+print_step "Building main image 'yumayo-ai'..."
+
 BUILD_OPTS=""
-if [ "$1" = "rebuild" ]; then
+if [ "$1" = "rebuild" ] || [ "$1" = "rebuild-all" ]; then
     BUILD_OPTS="--no-cache"
     print_info "Rebuilding without cache..."
-else
-    print_info "Building with cache (use 'rebuild' argument for no-cache)..."
 fi
 
 if (cd docker && docker build $BUILD_OPTS -t yumayo-ai -f Dockerfile .); then
