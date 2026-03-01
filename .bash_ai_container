@@ -85,7 +85,7 @@ __aicontainer_parse_config() {
     [[ "$line" =~ ^[[:space:]]*# ]] && continue
     [[ "$line" =~ ^[[:space:]]*$ ]] && continue
 
-    if [[ "$line" =~ ^[[:space:]]*([a-zA-Z_][a-zA-Z0-9_]*)[[:space:]]*=[[:space:]]*(.*)[[:space:]]*$ ]]; then
+    if [[ "$line" =~ ^[[:space:]]*([a-zA-Z_][a-zA-Z0-9_-]*)[[:space:]]*=[[:space:]]*(.*)[[:space:]]*$ ]]; then
       local key="${BASH_REMATCH[1]}"
       local value="${BASH_REMATCH[2]}"
       if [[ "$value" =~ ^\"(.*)\"$ ]] || [[ "$value" =~ ^\'(.*)\'$ ]]; then
@@ -106,6 +106,37 @@ __aicontainer_ensure_network() {
   fi
 }
 
+__aicontainer_start_proxy() {
+  local proxy_name="yumayo-ai-proxy"
+  local proxy_volume="yumayo-ai-proxy-sock"
+
+  if docker ps -q -f name="^${proxy_name}$" | grep -q .; then
+    echo "docker-proxy: already running"
+    return 0
+  fi
+
+  echo "docker-proxy: starting..."
+  docker rm "$proxy_name" 2>/dev/null || true
+  docker volume create "$proxy_volume" &>/dev/null || true
+  docker run -d \
+    --name "$proxy_name" \
+    -v /var/run/docker.sock:/var/run/docker.sock:ro \
+    -v "$proxy_volume":/var/run/docker-proxy \
+    yumayo-ai-proxy
+
+  # ソケット準備待ち
+  local retries=0
+  while ! docker exec "$proxy_name" test -S /var/run/docker-proxy/docker.sock 2>/dev/null; do
+    sleep 0.2
+    retries=$((retries + 1))
+    if [ $retries -ge 25 ]; then
+      echo "Error: docker-proxy socket not ready" >&2
+      return 1
+    fi
+  done
+  echo "docker-proxy: ready"
+}
+
 aicontainer() {
   # モードに応じてディレクトリを決定
   local ai_dir=".claude.local"
@@ -120,6 +151,7 @@ aicontainer() {
   __aicontainer_parse_config
   local config_network="${AICONTAINER_CONFIG[network]:-}"
   local config_session="${AICONTAINER_CONFIG[session]:-}"
+  local config_docker_proxy="${AICONTAINER_CONFIG[docker-proxy]:-}"
 
   # セッションパスの解決（session指定時）
   local session_path=""
@@ -283,6 +315,11 @@ aicontainer() {
     __aicontainer_ensure_network "$network" || return 1
   fi
 
+  # docker-proxyの起動（dumpモード時はスキップ）
+  if [ "$config_docker_proxy" = "true" ] && [ "$dump_mode" != true ]; then
+    __aicontainer_start_proxy || return 1
+  fi
+
   # dockerコマンドを構築
   local workdir="$(pwd)"
   local session_mounts=""
@@ -317,6 +354,12 @@ aicontainer() {
     --mount type=bind,source=\"$workdir/$ai_dir/.claude\",target=/home/ubuntu/.claude \\
     --mount type=bind,source=\"$workdir/$ai_dir/.claude.json\",target=/home/ubuntu/.claude.json"
     fi
+  fi
+
+  # docker-proxy有効時: プロキシソケットのマウントとDOCKER_HOSTを追加
+  if [ "$config_docker_proxy" = "true" ]; then
+    extra_opts="$extra_opts -v yumayo-ai-proxy-sock:/var/run/docker-proxy"
+    extra_env="$extra_env -e DOCKER_HOST=unix:///var/run/docker-proxy/docker.sock"
   fi
 
   local docker_cmd="docker run -ti --rm \\

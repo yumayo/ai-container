@@ -57,11 +57,30 @@ if [ "$1" = "rebuild-all" ]; then
     print_info "Rebuilding base image without cache..."
 fi
 
-if (cd docker && docker build $BASE_BUILD_OPTS -t yumayo-ai-base -f Dockerfile.base .); then
+if (cd docker/aicontainer && docker build $BASE_BUILD_OPTS -t yumayo-ai-base -f Dockerfile.base .); then
     print_success "Base image 'yumayo-ai-base' built successfully"
 else
     echo ""
     print_error "Failed to build base image"
+    exit 1
+fi
+
+echo ""
+
+# プロキシイメージのビルド
+print_step "Building proxy image 'yumayo-ai-proxy'..."
+
+PROXY_BUILD_OPTS=""
+if [ "$1" = "rebuild" ] || [ "$1" = "rebuild-all" ]; then
+    PROXY_BUILD_OPTS="--no-cache"
+    print_info "Rebuilding proxy image without cache..."
+fi
+
+if (cd docker/nginx && docker build $PROXY_BUILD_OPTS -t yumayo-ai-proxy .); then
+    print_success "Proxy image 'yumayo-ai-proxy' built successfully"
+else
+    echo ""
+    print_error "Failed to build proxy image"
     exit 1
 fi
 
@@ -76,7 +95,7 @@ if [ "$1" = "rebuild" ] || [ "$1" = "rebuild-all" ]; then
     print_info "Rebuilding without cache..."
 fi
 
-if (cd docker && docker build $BUILD_OPTS -t yumayo-ai -f Dockerfile .); then
+if (cd docker/aicontainer && docker build $BUILD_OPTS -t yumayo-ai .); then
     echo ""
     print_success "Docker image 'yumayo-ai' built successfully"
 else

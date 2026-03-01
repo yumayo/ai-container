@@ -50,11 +50,12 @@ node_modules
 - サブディレクトリにも配置可能（再帰的に処理）
 - globパターン（`*.log` 等）は未サポート
 
-### `.aicontainer` — ネットワーク・セッション設定
+### `.aicontainer` — コンテナ動作設定
 
 ```
 network=myproject       # Dockerネットワーク名（yumayo-ai-myproject）
 session=../             # セッション共有パス（複数プロジェクトで共有可能）
+docker-proxy=true       # Docker Socket Proxyを有効化
 ```
 
 ### `.aimount` — 追加マウント
@@ -66,6 +67,46 @@ ${API_KEY?}:/workspace/api-key
 ```
 
 環境変数展開（`$VAR`, `${VAR:-default}`, `${VAR?}` 等）に対応。
+
+## Docker Socket Proxy（外部コンテナ連携）
+
+Playwright などのツールをAIコンテナに入れず、ホスト上の別コンテナで実行して `docker compose exec` で呼び出せます。
+
+```
+AI Container ──(Unix Socket)──> nginx Proxy ──(Docker Socket)──> Docker Engine
+  DOCKER_HOST=/var/run/             exec以外を                  /var/run/
+  docker-proxy/docker.sock          403で拒否                   docker.sock
+```
+
+### 手順
+
+1. ホスト側で外部コンテナを起動しておく
+
+```sh
+docker compose up -d
+```
+
+2. `.aicontainer` に設定を追加
+
+```
+docker-proxy=true
+```
+
+3. `aicontainer` を起動し、AI内からコマンドを実行
+
+```sh
+docker compose exec playwright npx playwright test
+```
+
+### セキュリティ
+
+プロキシは `exec` 関連のAPIのみ許可します。コンテナの作成・削除やイメージ操作は全て拒否されます。
+
+```sh
+docker compose exec myapp echo hello  # OK
+docker run ubuntu echo hello          # 403 Forbidden
+docker rm mycontainer                 # 403 Forbidden
+```
 
 ## セキュリティ
 
