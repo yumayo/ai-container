@@ -52,7 +52,7 @@ print_header
 print_step "Building base image 'yumayo-ai-base'..."
 
 BASE_BUILD_OPTS=""
-if [ "$1" = "rebuild-all" ]; then
+if [ "$1" = "rebuild" ]; then
     BASE_BUILD_OPTS="--no-cache"
     print_info "Rebuilding base image without cache..."
 fi
@@ -70,11 +70,7 @@ echo ""
 # プロキシイメージのビルド
 print_step "Building proxy image 'yumayo-ai-proxy'..."
 
-PROXY_BUILD_OPTS=""
-if [ "$1" = "rebuild" ] || [ "$1" = "rebuild-all" ]; then
-    PROXY_BUILD_OPTS="--no-cache"
-    print_info "Rebuilding proxy image without cache..."
-fi
+PROXY_BUILD_OPTS="--no-cache"
 
 if (cd docker/nginx && docker build $PROXY_BUILD_OPTS -t yumayo-ai-proxy .); then
     print_success "Proxy image 'yumayo-ai-proxy' built successfully"
@@ -89,11 +85,7 @@ echo ""
 # メインイメージのビルド
 print_step "Building main image 'yumayo-ai'..."
 
-BUILD_OPTS=""
-if [ "$1" = "rebuild" ] || [ "$1" = "rebuild-all" ]; then
-    BUILD_OPTS="--no-cache"
-    print_info "Rebuilding without cache..."
-fi
+BUILD_OPTS="--no-cache"
 
 if (cd docker/aicontainer && docker build $BUILD_OPTS -t yumayo-ai .); then
     echo ""

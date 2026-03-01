@@ -107,6 +107,7 @@ __aicontainer_ensure_network() {
 }
 
 __aicontainer_start_proxy() {
+  local proxy_allow="${1:-}"
   local proxy_name="yumayo-ai-proxy"
   local proxy_volume="yumayo-ai-proxy-sock"
 
@@ -120,6 +121,7 @@ __aicontainer_start_proxy() {
   docker volume create "$proxy_volume" &>/dev/null || true
   docker run -d \
     --name "$proxy_name" \
+    -e DOCKER_PROXY_ALLOW="$proxy_allow" \
     -v /var/run/docker.sock:/var/run/docker.sock:ro \
     -v "$proxy_volume":/var/run/docker-proxy \
     yumayo-ai-proxy
@@ -152,6 +154,7 @@ aicontainer() {
   local config_network="${AICONTAINER_CONFIG[network]:-}"
   local config_session="${AICONTAINER_CONFIG[session]:-}"
   local config_docker_proxy="${AICONTAINER_CONFIG[docker-proxy]:-}"
+  local config_docker_proxy_allow="${AICONTAINER_CONFIG[docker-proxy-allow]:-}"
 
   # セッションパスの解決（session指定時）
   local session_path=""
@@ -317,7 +320,7 @@ aicontainer() {
 
   # docker-proxyの起動（dumpモード時はスキップ）
   if [ "$config_docker_proxy" = "true" ] && [ "$dump_mode" != true ]; then
-    __aicontainer_start_proxy || return 1
+    __aicontainer_start_proxy "$config_docker_proxy_allow" || return 1
   fi
 
   # dockerコマンドを構築

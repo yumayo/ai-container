@@ -19,8 +19,7 @@ echo 'if [ -f ~/.bash_ai_container ]; then . ~/.bash_ai_container; fi' >> ~/.bas
 再ビルドする場合:
 
 ```sh
-bash install.sh rebuild      # CLIツール部分のみ再ビルド
-bash install.sh rebuild-all  # ベースイメージ含め全て再ビルド
+bash install.sh rebuild  # ベースイメージ含め全て再ビルド
 ```
 
 ## 使い方
@@ -53,9 +52,10 @@ node_modules
 ### `.aicontainer` — コンテナ動作設定
 
 ```
-network=myproject       # Dockerネットワーク名（yumayo-ai-myproject）
-session=../             # セッション共有パス（複数プロジェクトで共有可能）
-docker-proxy=true       # Docker Socket Proxyを有効化
+network=myproject           # Dockerネットワーク名（yumayo-ai-myproject）
+session=../                 # セッション共有パス（複数プロジェクトで共有可能）
+docker-proxy=true           # Docker Socket Proxyを有効化
+docker-proxy-allow=npx,node # execで許可するコマンド（カンマ区切り）
 ```
 
 ### `.aimount` — 追加マウント
@@ -90,6 +90,7 @@ docker compose up -d
 
 ```
 docker-proxy=true
+docker-proxy-allow=npx,node
 ```
 
 3. `aicontainer` を起動し、AI内からコマンドを実行
@@ -100,12 +101,23 @@ docker compose exec playwright npx playwright test
 
 ### セキュリティ
 
-プロキシは `exec` 関連のAPIのみ許可します。コンテナの作成・削除やイメージ操作は全て拒否されます。
+プロキシは2段階でアクセスを制限します。
+
+**APIレベル**: `exec` 関連のエンドポイントのみ許可します。コンテナの作成・削除やイメージ操作は全て拒否されます。
 
 ```sh
-docker compose exec myapp echo hello  # OK
-docker run ubuntu echo hello          # 403 Forbidden
-docker rm mycontainer                 # 403 Forbidden
+docker run ubuntu echo hello  # 403 Forbidden
+docker rm mycontainer         # 403 Forbidden
+```
+
+**コマンドレベル**: `docker-proxy-allow` で指定したコマンドのみ `docker exec` で実行できます。未指定の場合、全てのコマンドが拒否されます。
+
+```sh
+# docker-proxy-allow=npx,node の場合
+docker compose exec myapp npx playwright test  # OK
+docker compose exec myapp node script.js       # OK
+docker compose exec myapp cat .env             # 403 Forbidden
+docker compose exec myapp /usr/bin/npx test    # OK（フルパスでも判定可能）
 ```
 
 ## セキュリティ
