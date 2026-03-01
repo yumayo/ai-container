@@ -52,10 +52,10 @@ node_modules
 ### `.aicontainer` — コンテナ動作設定
 
 ```
-network=myproject           # Dockerネットワーク名（yumayo-ai-myproject）
-session=../                 # セッション共有パス（複数プロジェクトで共有可能）
-docker-proxy=true           # Docker Socket Proxyを有効化
-docker-proxy-allow=npx,node # execで許可するコマンド（カンマ区切り）
+network=myproject                      # Dockerネットワーク名（yumayo-ai-myproject）
+session=../                            # セッション共有パス（複数プロジェクトで共有可能）
+docker-proxy-name=myproject            # Docker Socket Proxyを有効化（プロキシ名を指定）
+docker-proxy-allow=npx playwright,node # execで許可するコマンド（カンマ区切り）
 ```
 
 ### `.aimount` — 追加マウント
@@ -89,8 +89,8 @@ docker compose up -d
 2. `.aicontainer` に設定を追加
 
 ```
-docker-proxy=true
-docker-proxy-allow=npx,node
+docker-proxy-name=playwright
+docker-proxy-allow=npx playwright
 ```
 
 3. `aicontainer` を起動し、AI内からコマンドを実行
@@ -110,14 +110,15 @@ docker run ubuntu echo hello  # 403 Forbidden
 docker rm mycontainer         # 403 Forbidden
 ```
 
-**コマンドレベル**: `docker-proxy-allow` で指定したコマンドのみ `docker exec` で実行できます。未指定の場合、全てのコマンドが拒否されます。
+**コマンドレベル**: `docker-proxy-allow` で指定したコマンドのみ `docker exec` で実行できます。未指定の場合、全てのコマンドが拒否されます。コマンド名に続けて引数も指定でき、前方一致で判定します。
 
 ```sh
-# docker-proxy-allow=npx,node の場合
-docker compose exec myapp npx playwright test  # OK
-docker compose exec myapp node script.js       # OK
+# docker-proxy-allow=npx playwright,node の場合
+docker compose exec myapp npx playwright test  # OK（npx playwright に一致）
+docker compose exec myapp npx webpack          # 403 Forbidden
+docker compose exec myapp node script.js       # OK（node に一致）
 docker compose exec myapp cat .env             # 403 Forbidden
-docker compose exec myapp /usr/bin/npx test    # OK（フルパスでも判定可能）
+docker compose exec myapp /usr/bin/npx playwright test  # OK（フルパスでも判定可能）
 ```
 
 ## セキュリティ

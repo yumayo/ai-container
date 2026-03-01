@@ -108,15 +108,23 @@ __aicontainer_ensure_network() {
 
 __aicontainer_start_proxy() {
   local proxy_allow="${1:-}"
-  local proxy_name="yumayo-ai-proxy"
-  local proxy_volume="yumayo-ai-proxy-sock"
+  local proxy_name="yumayo-ai-proxy-${2}"
+  local proxy_volume="yumayo-ai-proxy-${2}-sock"
 
+  # 既に起動中の場合、allow設定が変わっていれば再起動
   if docker ps -q -f name="^${proxy_name}$" | grep -q .; then
-    echo "docker-proxy: already running"
-    return 0
+    local current_allow
+    current_allow="$(docker exec "$proxy_name" cat /etc/nginx/docker-proxy-allow.txt 2>/dev/null || true)"
+    if [ "$current_allow" = "$proxy_allow" ]; then
+      echo "docker-proxy($2): already running"
+      return 0
+    fi
+    echo "docker-proxy($2): allow config changed, restarting..."
+    docker stop "$proxy_name" &>/dev/null || true
+    docker rm "$proxy_name" &>/dev/null || true
   fi
 
-  echo "docker-proxy: starting..."
+  echo "docker-proxy($2): starting..."
   docker rm "$proxy_name" 2>/dev/null || true
   docker volume create "$proxy_volume" &>/dev/null || true
   docker run -d \
@@ -136,7 +144,7 @@ __aicontainer_start_proxy() {
       return 1
     fi
   done
-  echo "docker-proxy: ready"
+  echo "docker-proxy($2): ready"
 }
 
 aicontainer() {
@@ -153,7 +161,7 @@ aicontainer() {
   __aicontainer_parse_config
   local config_network="${AICONTAINER_CONFIG[network]:-}"
   local config_session="${AICONTAINER_CONFIG[session]:-}"
-  local config_docker_proxy="${AICONTAINER_CONFIG[docker-proxy]:-}"
+  local config_docker_proxy_name="${AICONTAINER_CONFIG[docker-proxy-name]:-}"
   local config_docker_proxy_allow="${AICONTAINER_CONFIG[docker-proxy-allow]:-}"
 
   # セッションパスの解決（session指定時）
@@ -319,8 +327,8 @@ aicontainer() {
   fi
 
   # docker-proxyの起動（dumpモード時はスキップ）
-  if [ "$config_docker_proxy" = "true" ] && [ "$dump_mode" != true ]; then
-    __aicontainer_start_proxy "$config_docker_proxy_allow" || return 1
+  if [ -n "$config_docker_proxy_name" ] && [ "$dump_mode" != true ]; then
+    __aicontainer_start_proxy "$config_docker_proxy_allow" "$config_docker_proxy_name" || return 1
   fi
 
   # dockerコマンドを構築
@@ -360,8 +368,8 @@ aicontainer() {
   fi
 
   # docker-proxy有効時: プロキシソケットのマウントとDOCKER_HOSTを追加
-  if [ "$config_docker_proxy" = "true" ]; then
-    extra_opts="$extra_opts -v yumayo-ai-proxy-sock:/var/run/docker-proxy"
+  if [ -n "$config_docker_proxy_name" ]; then
+    extra_opts="$extra_opts -v yumayo-ai-proxy-${config_docker_proxy_name}-sock:/var/run/docker-proxy"
     extra_env="$extra_env -e DOCKER_HOST=unix:///var/run/docker-proxy/docker.sock"
   fi
 
