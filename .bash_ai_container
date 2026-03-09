@@ -276,7 +276,7 @@ aicontainer() {
 
   # 引数チェック
   local dump_mode=false
-  local cmd="claude --dangerously-skip-permissions"
+  local cmd="claude --dangerously-skip-permissions --disallowedTools WebSearch,WebFetch"
   # プレフィックス付与: .aicontainer指定時は yumayo-ai-<name>、未指定時は yumayo-ai
   local network="yumayo-ai"
   if [ -n "$config_network" ]; then
@@ -295,7 +295,7 @@ aicontainer() {
       echo "Error: model name required. Usage: aicontainer ollama <model>" >&2
       return 1
     fi
-    cmd="claude --dangerously-skip-permissions --model $model"
+    cmd="claude --dangerously-skip-permissions --disallowedTools WebSearch,WebFetch --model $model"
     extra_env="-e ANTHROPIC_AUTH_TOKEN=ollama -e ANTHROPIC_BASE_URL=http://ollama:11434"
     # https://github.com/yumayo/nginx-open-webui-ollama
     # ネットワークを切り替えています。
