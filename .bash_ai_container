@@ -163,6 +163,7 @@ aicontainer() {
   local config_session="${AICONTAINER_CONFIG[session]:-}"
   local config_docker_proxy_name="${AICONTAINER_CONFIG[docker-proxy-name]:-}"
   local config_docker_proxy_allow="${AICONTAINER_CONFIG[docker-proxy-allow]:-}"
+  local config_image="${AICONTAINER_CONFIG[image]:-yumayo-ai}"
 
   # セッションパスの解決（session指定時）
   local session_path=""
@@ -381,7 +382,7 @@ aicontainer() {
     $extra_opts \\
     --mount type=bind,source=\"$workdir\",target=\"$workdir\" \\
     $session_mounts$AI_MOUNT$AI_IGNORE \\
-    yumayo-ai \\
+    $config_image \\
     $shell_prefix -ci \"${init_cmd}$cmd\""
 
   if [ "$dump_mode" = true ]; then
