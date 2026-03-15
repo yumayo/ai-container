@@ -283,7 +283,10 @@ aicontainer() {
   if [ -n "$config_network" ]; then
     network="yumayo-ai-$config_network"
   fi
-  local extra_env=""
+  # 1Mコンテキストが使用できないことがあるらしいのでOFFにしてます。
+  # https://github.com/anthropics/claude-code/issues/34143#issuecomment-4058474125
+  # extra_env="-e DISABLE_TELEMETRY=1 -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"
+  local extra_env="-e DISABLE_AUTOUPDATER=true"
   local extra_opts="--cap-add=NET_ADMIN --cap-add=NET_RAW"
   local shell_prefix="bash"
 
