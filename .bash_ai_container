@@ -107,8 +107,14 @@ __aicontainer_parse_config() {
       if [[ "$value" =~ ^\"(.*)\"$ ]] || [[ "$value" =~ ^\'(.*)\'$ ]]; then
         value="${BASH_REMATCH[1]}"
       fi
-      AICONTAINER_CONFIG["$key"]="$value"
-      echo "  config: $key=$value"
+      # pathキーは複数指定可能なため配列に蓄積
+      if [ "$key" = "path" ]; then
+        AICONTAINER_PATHS+=("$value")
+        echo "  config: $key=$value"
+      else
+        AICONTAINER_CONFIG["$key"]="$value"
+        echo "  config: $key=$value"
+      fi
     fi
   done < "$config_file"
 }
@@ -200,6 +206,7 @@ aicontainer() {
 
   # .aicontainerの設定を読み込み
   declare -A AICONTAINER_CONFIG
+  AICONTAINER_PATHS=()
   __aicontainer_parse_config
   local config_network="${AICONTAINER_CONFIG[network]:-}"
   local config_session="${AICONTAINER_CONFIG[session]:-}"
@@ -382,6 +389,20 @@ aicontainer() {
   local session_mounts=""
   local init_cmd=""
 
+  # .aicontainerのpath設定をPATHに追加
+  if [ ${#AICONTAINER_PATHS[@]} -gt 0 ]; then
+    local extra_paths=""
+    for p in "${AICONTAINER_PATHS[@]}"; do
+      # 相対パスはworkdir基準で絶対パスに変換
+      if [[ ! "$p" =~ ^/ ]]; then
+        p="$workdir/$p"
+      fi
+      extra_paths="${extra_paths}${p}:"
+    done
+    # .bashrcに書き込み（後続のシェルでもPATHが有効）+ 現在のシェルにもexport
+    init_cmd="echo 'export PATH=${extra_paths}\\\$PATH' >> ~/.bashrc && export PATH=${extra_paths}\\\$PATH && "
+  fi
+
   if [ -n "$config_session" ]; then
     # セッションモード: ホストの指定パスをバインドマウント
     if [ "$1" = "codex" ]; then
@@ -427,7 +448,7 @@ aicontainer() {
   if [ "$detach_mode" = true ]; then
     local container_name="yumayo-ai-detach-$(basename "$workdir")"
     run_flags="-d"
-    run_cmd="sleep infinity"
+    run_cmd="bash -c \"${init_cmd}sleep infinity\""
     container_name_opt="--name $container_name"
     # VS Code Server等の永続化
     local vscode_dir="$workdir/.vscode.local"
