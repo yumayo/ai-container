@@ -51,50 +51,70 @@ print_header
 # ベースイメージのビルド
 print_step "Building base image 'yumayo-ai-base'..."
 
-BASE_BUILD_OPTS=""
-if [ "$1" = "rebuild" ]; then
-    BASE_BUILD_OPTS="--no-cache"
-    print_info "Rebuilding base image without cache..."
+TARGET="${1:-all}"
+NO_CACHE_OPT=""
+if [ "$TARGET" = "rebuild" ]; then
+    TARGET="all"
+    NO_CACHE_OPT="--no-cache"
 fi
 
-if (cd docker/aicontainer && docker build $BASE_BUILD_OPTS -t yumayo-ai-base -f Dockerfile.base .); then
-    print_success "Base image 'yumayo-ai-base' built successfully"
-else
+build_base() {
+    print_step "Building base image 'yumayo-ai-base'..."
+    if (cd docker/aicontainer && docker build $NO_CACHE_OPT -t yumayo-ai-base -f Dockerfile.base .); then
+        print_success "Base image 'yumayo-ai-base' built successfully"
+    else
+        echo ""
+        print_error "Failed to build base image"
+        exit 1
+    fi
     echo ""
-    print_error "Failed to build base image"
-    exit 1
-fi
+}
 
-echo ""
-
-# プロキシイメージのビルド
-print_step "Building proxy image 'yumayo-ai-proxy'..."
-
-PROXY_BUILD_OPTS="--no-cache"
-
-if (cd docker/nginx && docker build $PROXY_BUILD_OPTS -t yumayo-ai-proxy .); then
-    print_success "Proxy image 'yumayo-ai-proxy' built successfully"
-else
+build_proxy() {
+    print_step "Building proxy image 'yumayo-ai-proxy'..."
+    if (cd docker/docker-proxy && docker build --no-cache -t yumayo-ai-proxy .); then
+        print_success "Proxy image 'yumayo-ai-proxy' built successfully"
+    else
+        echo ""
+        print_error "Failed to build proxy image"
+        exit 1
+    fi
     echo ""
-    print_error "Failed to build proxy image"
-    exit 1
-fi
+}
 
-echo ""
+build_main() {
+    print_step "Building main image 'yumayo-ai'..."
+    if (cd docker/aicontainer && docker build --no-cache -t yumayo-ai .); then
+        echo ""
+        print_success "Docker image 'yumayo-ai' built successfully"
+    else
+        echo ""
+        print_error "Failed to build Docker image"
+        exit 1
+    fi
+}
 
-# メインイメージのビルド
-print_step "Building main image 'yumayo-ai'..."
-
-BUILD_OPTS="--no-cache"
-
-if (cd docker/aicontainer && docker build $BUILD_OPTS -t yumayo-ai .); then
-    echo ""
-    print_success "Docker image 'yumayo-ai' built successfully"
-else
-    echo ""
-    print_error "Failed to build Docker image"
-    exit 1
-fi
+case "$TARGET" in
+    all)
+        build_base
+        build_proxy
+        build_main
+        ;;
+    base)
+        build_base
+        ;;
+    proxy)
+        build_proxy
+        ;;
+    main)
+        build_main
+        ;;
+    *)
+        print_error "Unknown target: $TARGET"
+        print_info "Usage: bash install.sh [all|base|proxy|main|rebuild]"
+        exit 1
+        ;;
+esac
 
 # 完了メッセージ
 echo ""

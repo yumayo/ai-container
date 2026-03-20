@@ -136,7 +136,7 @@ __aicontainer_start_proxy() {
   # 既に起動中の場合、allow設定が変わっていれば再起動
   if docker ps -q -f name="^${proxy_name}$" | grep -q .; then
     local current_allow
-    current_allow="$(docker exec "$proxy_name" cat /etc/nginx/docker-proxy-allow.txt 2>/dev/null || true)"
+    current_allow="$(docker exec "$proxy_name" cat /etc/docker-proxy/allow.txt 2>/dev/null || true)"
     if [ "$current_allow" = "$proxy_allow" ]; then
       echo "docker-proxy($2): already running"
       return 0

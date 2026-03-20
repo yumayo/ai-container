@@ -73,9 +73,9 @@ ${API_KEY?}:/workspace/api-key
 Playwright などのツールをAIコンテナに入れず、ホスト上の別コンテナで実行して `docker compose exec` で呼び出せます。
 
 ```
-AI Container ──(Unix Socket)──> nginx Proxy ──(Docker Socket)──> Docker Engine
-  DOCKER_HOST=/var/run/             exec以外を                  /var/run/
-  docker-proxy/docker.sock          403で拒否                   docker.sock
+AI Container ──(Unix Socket)──> Go Proxy ──(Docker Socket)──> Docker Engine
+  DOCKER_HOST=/var/run/            exec以外を                  /var/run/
+  docker-proxy/docker.sock         403で拒否                   docker.sock
 ```
 
 ### 手順
