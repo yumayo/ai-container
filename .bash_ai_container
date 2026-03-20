@@ -164,6 +164,32 @@ __aicontainer_start_proxy() {
 }
 
 aicontainer() {
+  # 引数から -d フラグを抽出
+  local detach_mode=false
+  local args=()
+  for arg in "$@"; do
+    if [ "$arg" = "-d" ]; then
+      detach_mode=true
+    else
+      args+=("$arg")
+    fi
+  done
+  if [ ${#args[@]} -gt 0 ]; then
+    set -- "${args[@]}"
+  else
+    set --
+  fi
+
+  # デタッチコンテナの停止・削除
+  if [ "$1" = "stop" ]; then
+    local container_name="yumayo-ai-detach-$(basename "$(pwd)")"
+    echo "stopping container: $container_name"
+    docker stop "$container_name" 2>/dev/null && docker rm "$container_name" 2>/dev/null \
+      && echo "container stopped and removed: $container_name" \
+      || echo "container not found: $container_name"
+    return
+  fi
+
   # モードに応じてディレクトリを決定
   local ai_dir=".claude.local"
   if [ "$1" = "ollama" ]; then
@@ -393,16 +419,34 @@ aicontainer() {
     extra_env="$extra_env -e DOCKER_HOST=unix:///var/run/docker-proxy/docker.sock"
   fi
 
-  local docker_cmd="docker run -ti --rm \\
+  # デタッチモード: -d 指定時は --rm なし、sleep infinity で維持
+  local run_flags="-ti --rm"
+  local run_cmd="$shell_prefix -ci \"${init_cmd}$cmd\""
+  local container_name_opt=""
+  local detach_mounts=""
+  if [ "$detach_mode" = true ]; then
+    local container_name="yumayo-ai-detach-$(basename "$workdir")"
+    run_flags="-d"
+    run_cmd="sleep infinity"
+    container_name_opt="--name $container_name"
+    # VS Code Server等の永続化
+    local vscode_dir="$workdir/.vscode.local"
+    mkdir -p "$vscode_dir"
+    detach_mounts=" \\
+    --mount type=bind,source=\"$vscode_dir\",target=/home/ubuntu/.vscode-server"
+  fi
+
+  local docker_cmd="docker run $run_flags \\
     --stop-timeout 0 \\
+    $container_name_opt \\
     --network $network \\
     -w \"$workdir\" \\
     $extra_env \\
     $extra_opts \\
     --mount type=bind,source=\"$workdir\",target=\"$workdir\" \\
-    $session_mounts$AI_MOUNT$AI_IGNORE \\
+    $session_mounts$detach_mounts$AI_MOUNT$AI_IGNORE \\
     $config_image \\
-    $shell_prefix -ci \"${init_cmd}$cmd\""
+    $run_cmd"
 
   if [ "$dump_mode" = true ]; then
     echo "$docker_cmd"
@@ -410,5 +454,11 @@ aicontainer() {
     # before-start-up hookを実行
     __aicontainer_run_hook "before-start-up" || return 1
     eval "$docker_cmd"
+    if [ "$detach_mode" = true ]; then
+      echo ""
+      echo "コンテナが起動しました: $container_name"
+      echo "VS Codeの「Dev Containers」拡張から「Attach to Running Container」で接続できます。"
+      echo "停止するには: aicontainer stop"
+    fi
   fi
 }
