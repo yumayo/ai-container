@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -144,23 +145,64 @@ func (p *proxy) passthrough(w http.ResponseWriter, r *http.Request) {
 
 // isContainerAllowed checks if the given container name/ID is in the allowed list.
 // If no allowed list is configured, all containers are denied.
+// If nameOrID looks like a container ID (hex, >=12 chars), it resolves the name via Docker API.
 func (p *proxy) isContainerAllowed(nameOrID string) bool {
 	if len(p.allowedContainers) == 0 {
 		return false
 	}
+	// Direct match by name
 	for _, allowed := range p.allowedContainers {
 		if nameOrID == allowed {
 			return true
 		}
-		// Also match as a prefix for container IDs (short ID match)
-		if len(nameOrID) >= 12 && strings.HasPrefix(nameOrID, allowed) {
-			return true
-		}
-		if len(allowed) >= 12 && strings.HasPrefix(allowed, nameOrID) {
-			return true
+	}
+	// If it looks like a container ID, resolve to name via Docker API
+	if isHexString(nameOrID) && len(nameOrID) >= 12 {
+		if name := p.resolveContainerName(nameOrID); name != "" {
+			for _, allowed := range p.allowedContainers {
+				if name == allowed {
+					return true
+				}
+			}
 		}
 	}
 	return false
+}
+
+func isHexString(s string) bool {
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return len(s) > 0
+}
+
+// resolveContainerName queries Docker API to get the container name from an ID.
+func (p *proxy) resolveContainerName(id string) string {
+	conn, err := p.dialDocker()
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+
+	reqStr := fmt.Sprintf("GET /containers/%s/json HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n", id)
+	conn.Write([]byte(reqStr))
+
+	req, _ := http.NewRequest("GET", "/", nil)
+	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	defer resp.Body.Close()
+
+	var info struct {
+		Name string `json:"Name"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&info); err != nil {
+		return ""
+	}
+	return strings.TrimPrefix(info.Name, "/")
 }
 
 // extractContainerName extracts the container name/ID from a URL path like /containers/{name}/exec
@@ -207,8 +249,10 @@ func (p *proxy) handleContainersList(w http.ResponseWriter, r *http.Request) {
 
 		var containers []map[string]interface{}
 		if err := json.Unmarshal(body, &containers); err != nil {
-			// Can't parse: return as-is
-			resp.Body = io.NopCloser(strings.NewReader(string(body)))
+			// Can't parse: fail closed with empty list
+			resp.Body = io.NopCloser(strings.NewReader("[]"))
+			resp.ContentLength = 2
+			resp.Header.Set("Content-Length", "2")
 			return nil
 		}
 
@@ -228,16 +272,9 @@ func (p *proxy) handleContainersList(w http.ResponseWriter, r *http.Request) {
 	proxy.ServeHTTP(w, r)
 }
 
-// isContainerVisible checks if a container from /containers/json should be visible
+// isContainerVisible checks if a container from /containers/json should be visible.
+// Uses exact name match only to prevent unintended matches.
 func (p *proxy) isContainerVisible(container map[string]interface{}) bool {
-	// Check by ID
-	if id, ok := container["Id"].(string); ok {
-		for _, allowed := range p.allowedContainers {
-			if strings.HasPrefix(id, allowed) || strings.HasPrefix(allowed, id) {
-				return true
-			}
-		}
-	}
 	// Check by Names (Docker returns names with "/" prefix)
 	if names, ok := container["Names"].([]interface{}); ok {
 		for _, n := range names {
@@ -247,7 +284,7 @@ func (p *proxy) isContainerVisible(container map[string]interface{}) bool {
 			}
 			name = strings.TrimPrefix(name, "/")
 			for _, allowed := range p.allowedContainers {
-				if name == allowed || strings.HasPrefix(name, allowed+"-") || strings.HasSuffix(name, "-"+allowed) || strings.Contains(name, "-"+allowed+"-") {
+				if name == allowed {
 					return true
 				}
 			}
