@@ -54,8 +54,12 @@ node_modules
 ```
 network=myproject                      # Dockerネットワーク名（yumayo-ai-myproject）
 session=../                            # セッション共有パス（複数プロジェクトで共有可能）
+image=yumayo-ai-custom                 # 使用するDockerイメージ（デフォルト: yumayo-ai）
+path=./bin                             # コンテナ内PATHに追加（複数行指定可）
+before-start-up=./setup.sh             # コンテナ起動前にホスト側で実行するコマンド
 docker-proxy-name=myproject            # Docker Socket Proxyを有効化（プロキシ名を指定）
 docker-proxy-allow=npx playwright,node # execで許可するコマンド（カンマ区切り）
+docker-proxy-containers=myapp,mydb     # execを許可するコンテナ名（カンマ区切り、未指定で全拒否）
 ```
 
 ### `.aimount` — 追加マウント

@@ -20,9 +20,11 @@ import (
 type allowRule []string
 
 type proxy struct {
-	routes       []route
-	allowRules   []allowRule
-	dockerSocket string
+	routes                []route
+	allowRules            []allowRule
+	allowedContainers     []string
+	dockerSocket          string
+	containerNamePattern  *regexp.Regexp
 }
 
 type route struct {
@@ -65,23 +67,44 @@ func matchRule(rule allowRule, cmd []string) bool {
 	return true
 }
 
-func newProxy(rules []allowRule, dockerSocket string) *proxy {
+func loadContainerList(filePath string) []string {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil
+	}
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" {
+		return nil
+	}
+	var containers []string
+	for _, part := range strings.Split(trimmed, ",") {
+		s := strings.TrimSpace(part)
+		if s != "" {
+			containers = append(containers, s)
+		}
+	}
+	return containers
+}
+
+func newProxy(rules []allowRule, allowedContainers []string, dockerSocket string) *proxy {
 	p := &proxy{
-		allowRules:   rules,
-		dockerSocket: dockerSocket,
+		allowRules:        rules,
+		allowedContainers: allowedContainers,
+		dockerSocket:      dockerSocket,
 	}
 
 	prefix := `(?:v[\d.]+/)?`
 	p.routes = []route{
 		{regexp.MustCompile(`^/` + prefix + `_ping$`), p.passthrough},
 		{regexp.MustCompile(`^/` + prefix + `version$`), p.passthrough},
-		{regexp.MustCompile(`^/` + prefix + `containers/json$`), p.passthrough},
-		{regexp.MustCompile(`^/` + prefix + `containers/[a-zA-Z0-9_.-]+/json$`), p.passthrough},
+		{regexp.MustCompile(`^/` + prefix + `containers/json$`), p.handleContainersList},
+		{regexp.MustCompile(`^/` + prefix + `containers/[a-zA-Z0-9_.-]+/json$`), p.handleContainerAccess},
 		{regexp.MustCompile(`^/` + prefix + `containers/[a-zA-Z0-9_.-]+/exec$`), p.handleExecCreate},
 		{regexp.MustCompile(`^/` + prefix + `exec/[a-zA-Z0-9]+/start$`), p.handleExecStart},
 		{regexp.MustCompile(`^/` + prefix + `exec/[a-zA-Z0-9]+/json$`), p.passthrough},
 		{regexp.MustCompile(`^/` + prefix + `exec/[a-zA-Z0-9]+/resize$`), p.passthrough},
 	}
+	p.containerNamePattern = regexp.MustCompile(`/containers/([a-zA-Z0-9_.-]+)/`)
 	return p
 }
 
@@ -119,7 +142,131 @@ func (p *proxy) passthrough(w http.ResponseWriter, r *http.Request) {
 	p.reverseProxy().ServeHTTP(w, r)
 }
 
+// isContainerAllowed checks if the given container name/ID is in the allowed list.
+// If no allowed list is configured, all containers are denied.
+func (p *proxy) isContainerAllowed(nameOrID string) bool {
+	if len(p.allowedContainers) == 0 {
+		return false
+	}
+	for _, allowed := range p.allowedContainers {
+		if nameOrID == allowed {
+			return true
+		}
+		// Also match as a prefix for container IDs (short ID match)
+		if len(nameOrID) >= 12 && strings.HasPrefix(nameOrID, allowed) {
+			return true
+		}
+		if len(allowed) >= 12 && strings.HasPrefix(allowed, nameOrID) {
+			return true
+		}
+	}
+	return false
+}
+
+// extractContainerName extracts the container name/ID from a URL path like /containers/{name}/exec
+func (p *proxy) extractContainerName(path string) string {
+	matches := p.containerNamePattern.FindStringSubmatch(path)
+	if len(matches) >= 2 {
+		return matches[1]
+	}
+	return ""
+}
+
+func (p *proxy) handleContainerAccess(w http.ResponseWriter, r *http.Request) {
+	name := p.extractContainerName(r.URL.Path)
+	if name != "" && !p.isContainerAllowed(name) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		msg, _ := json.Marshal(map[string]string{"message": fmt.Sprintf("Forbidden: access to container %q is not allowed", name)})
+		w.Write(msg)
+		return
+	}
+	p.reverseProxy().ServeHTTP(w, r)
+}
+
+func (p *proxy) handleContainersList(w http.ResponseWriter, r *http.Request) {
+	if len(p.allowedContainers) == 0 {
+		// No containers configured: return empty list
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `[]`)
+		return
+	}
+
+	// Forward to Docker, then filter the response
+	proxy := p.reverseProxy()
+	proxy.ModifyResponse = func(resp *http.Response) error {
+		if resp.StatusCode != http.StatusOK {
+			return nil
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return err
+		}
+
+		var containers []map[string]interface{}
+		if err := json.Unmarshal(body, &containers); err != nil {
+			// Can't parse: return as-is
+			resp.Body = io.NopCloser(strings.NewReader(string(body)))
+			return nil
+		}
+
+		var filtered []map[string]interface{}
+		for _, c := range containers {
+			if p.isContainerVisible(c) {
+				filtered = append(filtered, c)
+			}
+		}
+
+		newBody, _ := json.Marshal(filtered)
+		resp.Body = io.NopCloser(strings.NewReader(string(newBody)))
+		resp.ContentLength = int64(len(newBody))
+		resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(newBody)))
+		return nil
+	}
+	proxy.ServeHTTP(w, r)
+}
+
+// isContainerVisible checks if a container from /containers/json should be visible
+func (p *proxy) isContainerVisible(container map[string]interface{}) bool {
+	// Check by ID
+	if id, ok := container["Id"].(string); ok {
+		for _, allowed := range p.allowedContainers {
+			if strings.HasPrefix(id, allowed) || strings.HasPrefix(allowed, id) {
+				return true
+			}
+		}
+	}
+	// Check by Names (Docker returns names with "/" prefix)
+	if names, ok := container["Names"].([]interface{}); ok {
+		for _, n := range names {
+			name, ok := n.(string)
+			if !ok {
+				continue
+			}
+			name = strings.TrimPrefix(name, "/")
+			for _, allowed := range p.allowedContainers {
+				if name == allowed || strings.HasPrefix(name, allowed+"-") || strings.HasSuffix(name, "-"+allowed) || strings.Contains(name, "-"+allowed+"-") {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 func (p *proxy) handleExecCreate(w http.ResponseWriter, r *http.Request) {
+	// Check container access
+	name := p.extractContainerName(r.URL.Path)
+	if name != "" && !p.isContainerAllowed(name) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		msg, _ := json.Marshal(map[string]string{"message": fmt.Sprintf("Forbidden: exec into container %q is not allowed", name)})
+		w.Write(msg)
+		return
+	}
+
 	if len(p.allowRules) == 0 {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
@@ -261,6 +408,7 @@ func getEnv(key, fallback string) string {
 
 func main() {
 	allowPath := getEnv("DOCKER_PROXY_ALLOW_FILE", "/etc/docker-proxy/allow.txt")
+	containersPath := getEnv("DOCKER_PROXY_CONTAINERS_FILE", "/etc/docker-proxy/containers.txt")
 	listenPath := getEnv("DOCKER_PROXY_LISTEN", "/var/run/docker-proxy/docker.sock")
 	dockerSocket := getEnv("DOCKER_PROXY_UPSTREAM", "/var/run/docker.sock")
 
@@ -268,6 +416,16 @@ func main() {
 	log.Printf("Loaded %d allow rules from %s", len(rules), allowPath)
 	for i, rule := range rules {
 		log.Printf("  rule[%d]: %s", i, strings.Join(rule, " "))
+	}
+
+	containers := loadContainerList(containersPath)
+	if len(containers) > 0 {
+		log.Printf("Loaded %d allowed containers from %s", len(containers), containersPath)
+		for i, c := range containers {
+			log.Printf("  container[%d]: %s", i, c)
+		}
+	} else {
+		log.Printf("No allowed containers configured (all container access denied)")
 	}
 
 	// Remove stale socket
@@ -286,7 +444,7 @@ func main() {
 
 	log.Printf("Listening on %s, upstream %s", listenPath, dockerSocket)
 
-	p := newProxy(rules, dockerSocket)
+	p := newProxy(rules, containers, dockerSocket)
 	server := &http.Server{Handler: p}
 
 	// Graceful shutdown

@@ -36,10 +36,20 @@ AI Container ──(Unix Socket)──> Go Proxy ──(Docker Socket)──> Do
 
 | エンドポイント | 処理レベル | 内容 |
 |---|---|---|
-| `containers/{id}/exec` | L7 (HTTP) | JSONボディを解析しCmdを許可リストで検証 |
+| `containers/json` | L7 (HTTP) | コンテナ一覧を許可リストでフィルタリング |
+| `containers/{id}/json` | L7 (HTTP) | コンテナ名/IDを許可リストで検証 |
+| `containers/{id}/exec` | L7 (HTTP) | コンテナ検証 + JSONボディを解析しCmdを許可リストで検証 |
 | `exec/{id}/start` | L4 (TCP) | HTTP hijackで生TCPパイプ |
-| `_ping`, `version`, `containers/json` 等 | L7 (HTTP) | httputil.ReverseProxy でパススルー |
+| `_ping`, `version` 等 | L7 (HTTP) | httputil.ReverseProxy でパススルー |
 | その他 | - | 403 Forbidden |
+
+### コンテナアクセス制御
+
+`DOCKER_PROXY_CONTAINERS` 環境変数（カンマ区切り）で、アクセスを許可するコンテナ名を指定する。未指定時は全コンテナへのアクセスを拒否（安全側デフォルト）。
+
+- `containers/json`: レスポンスをフィルタし、許可コンテナのみ返す
+- `containers/{id}/json`, `containers/{id}/exec`: URLパスからコンテナ名/IDを抽出し、許可リストにない場合は403
+- コンテナ名は完全一致のほか、短縮ID（12文字以上のprefix）でもマッチする
 
 ### exec/start のストリーム中継
 

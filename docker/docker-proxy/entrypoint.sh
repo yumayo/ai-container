@@ -3,6 +3,9 @@
 # 許可コマンドリストを書き出し（未指定時は空ファイル＝全コマンド拒否）
 printf '%s' "${DOCKER_PROXY_ALLOW:-}" > /etc/docker-proxy/allow.txt
 
+# 許可コンテナリストを書き出し（未指定時は空ファイル＝全コンテナ許可）
+printf '%s' "${DOCKER_PROXY_CONTAINERS:-}" > /etc/docker-proxy/containers.txt
+
 # 前回起動していた内容が残ることがあるため削除しておく
 rm -f /var/run/docker-proxy/docker.sock
 

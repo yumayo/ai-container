@@ -132,16 +132,18 @@ __aicontainer_start_proxy() {
   local proxy_allow="${1:-}"
   local proxy_name="yumayo-ai-proxy-${2}"
   local proxy_volume="yumayo-ai-proxy-${2}-sock"
+  local proxy_containers="${3:-}"
 
-  # 既に起動中の場合、allow設定が変わっていれば再起動
+  # 既に起動中の場合、設定が変わっていれば再起動
   if docker ps -q -f name="^${proxy_name}$" | grep -q .; then
-    local current_allow
+    local current_allow current_containers
     current_allow="$(docker exec "$proxy_name" cat /etc/docker-proxy/allow.txt 2>/dev/null || true)"
-    if [ "$current_allow" = "$proxy_allow" ]; then
+    current_containers="$(docker exec "$proxy_name" cat /etc/docker-proxy/containers.txt 2>/dev/null || true)"
+    if [ "$current_allow" = "$proxy_allow" ] && [ "$current_containers" = "$proxy_containers" ]; then
       echo "docker-proxy($2): already running"
       return 0
     fi
-    echo "docker-proxy($2): allow config changed, restarting..."
+    echo "docker-proxy($2): config changed, restarting..."
     docker stop "$proxy_name" &>/dev/null || true
     docker rm "$proxy_name" &>/dev/null || true
   fi
@@ -152,6 +154,7 @@ __aicontainer_start_proxy() {
   docker run -d \
     --name "$proxy_name" \
     -e DOCKER_PROXY_ALLOW="$proxy_allow" \
+    -e DOCKER_PROXY_CONTAINERS="$proxy_containers" \
     -v /var/run/docker.sock:/var/run/docker.sock:ro \
     -v "$proxy_volume":/var/run/docker-proxy \
     yumayo-ai-proxy
@@ -186,6 +189,7 @@ aicontainer() {
   local config_session="${AICONTAINER_CONFIG[session]:-}"
   local config_docker_proxy_name="${AICONTAINER_CONFIG[docker-proxy-name]:-}"
   local config_docker_proxy_allow="${AICONTAINER_CONFIG[docker-proxy-allow]:-}"
+  local config_docker_proxy_containers="${AICONTAINER_CONFIG[docker-proxy-containers]:-}"
   local config_image="${AICONTAINER_CONFIG[image]:-yumayo-ai}"
 
   # セッションパスの解決（session指定時）
@@ -355,7 +359,7 @@ aicontainer() {
 
   # docker-proxyの起動（dumpモード時はスキップ）
   if [ -n "$config_docker_proxy_name" ] && [ "$dump_mode" != true ]; then
-    __aicontainer_start_proxy "$config_docker_proxy_allow" "$config_docker_proxy_name" || return 1
+    __aicontainer_start_proxy "$config_docker_proxy_allow" "$config_docker_proxy_name" "$config_docker_proxy_containers" || return 1
   fi
 
   # dockerコマンドを構築
