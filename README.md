@@ -56,6 +56,7 @@ network=myproject                      # Dockerネットワーク名（yumayo-ai
 session=../                            # セッション共有パス（複数プロジェクトで共有可能）
 image=yumayo-ai-custom                 # 使用するDockerイメージ（デフォルト: yumayo-ai）
 path=./bin                             # コンテナ内PATHに追加（複数行指定可）
+env=CLAUDE_CODE_EFFORT_LEVEL=max       # コンテナに環境変数を追加（複数行指定可）
 before-start-up=./setup.sh             # コンテナ起動前にホスト側で実行するコマンド
 docker-proxy-name=myproject            # Docker Socket Proxyを有効化（プロキシ名を指定）
 docker-proxy-allow=npx playwright,node # execで許可するコマンド（カンマ区切り）

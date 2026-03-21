@@ -107,9 +107,12 @@ __aicontainer_parse_config() {
       if [[ "$value" =~ ^\"(.*)\"$ ]] || [[ "$value" =~ ^\'(.*)\'$ ]]; then
         value="${BASH_REMATCH[1]}"
       fi
-      # pathキーは複数指定可能なため配列に蓄積
+      # path, envキーは複数指定可能なため配列に蓄積
       if [ "$key" = "path" ]; then
         AICONTAINER_PATHS+=("$value")
+        echo "  config: $key=$value"
+      elif [ "$key" = "env" ]; then
+        AICONTAINER_ENVS+=("$value")
         echo "  config: $key=$value"
       else
         AICONTAINER_CONFIG["$key"]="$value"
@@ -184,6 +187,7 @@ aicontainer() {
   # .aicontainerの設定を読み込み
   declare -A AICONTAINER_CONFIG
   AICONTAINER_PATHS=()
+  AICONTAINER_ENVS=()
   __aicontainer_parse_config
   local config_network="${AICONTAINER_CONFIG[network]:-}"
   local config_session="${AICONTAINER_CONFIG[session]:-}"
@@ -350,6 +354,13 @@ aicontainer() {
   else
     # claudeモード（デフォルト）
     extra_env="-e CLAUDE_CODE_MAX_OUTPUT_TOKENS=64000 -e CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1"
+  fi
+
+  # .aicontainerのenv設定を追加
+  if [ ${#AICONTAINER_ENVS[@]} -gt 0 ]; then
+    for env_entry in "${AICONTAINER_ENVS[@]}"; do
+      extra_env="$extra_env -e $env_entry"
+    done
   fi
 
   # ネットワークが存在しない場合は作成する（dumpモード時はスキップ）
