@@ -176,14 +176,6 @@ __aicontainer_start_proxy() {
 }
 
 aicontainer() {
-  # モードに応じてディレクトリを決定
-  local ai_dir=".claude.local"
-  if [ "$1" = "ollama" ]; then
-    ai_dir=".claude.ollama"
-  elif [ "$1" = "codex" ]; then
-    ai_dir=".codex.local"
-  fi
-
   # .aicontainerの設定を読み込み
   declare -A AICONTAINER_CONFIG
   AICONTAINER_PATHS=()
@@ -195,6 +187,44 @@ aicontainer() {
   local config_docker_proxy_allow="${AICONTAINER_CONFIG[docker-proxy-allow]:-}"
   local config_docker_proxy_containers="${AICONTAINER_CONFIG[docker-proxy-containers]:-}"
   local config_image="${AICONTAINER_CONFIG[image]:-yumayo-ai}"
+  local config_tool="${AICONTAINER_CONFIG[tool]:-}"
+  local config_model="${AICONTAINER_CONFIG[model]:-}"
+
+  # ツールモードを決定（引数 > .aicontainer > デフォルト）
+  local AI_TOOL="${1:-}"
+  local AI_TOOL_MODEL=""
+  if [ -z "$AI_TOOL" ] && [ -n "$config_tool" ]; then
+    case "$config_tool" in
+      claude)
+        # デフォルトと同じなので何もしない
+        ;;
+      codex)
+        AI_TOOL="codex"
+        ;;
+      claude-ollama)
+        if [ -z "$config_model" ]; then
+          echo "Error: tool=claude-ollama requires 'model' setting in .aicontainer" >&2
+          return 1
+        fi
+        AI_TOOL="ollama"
+        AI_TOOL_MODEL="$config_model"
+        ;;
+      *)
+        echo "Error: unknown tool '$config_tool' in .aicontainer (expected: claude, codex, claude-ollama)" >&2
+        return 1
+        ;;
+    esac
+  elif [ "$AI_TOOL" = "ollama" ]; then
+    AI_TOOL_MODEL="${2:-}"
+  fi
+
+  # モードに応じてディレクトリを決定
+  local ai_dir=".claude.local"
+  if [ "$AI_TOOL" = "ollama" ]; then
+    ai_dir=".claude.ollama"
+  elif [ "$AI_TOOL" = "codex" ]; then
+    ai_dir=".codex.local"
+  fi
 
   # セッションパスの解決（session指定時）
   local session_path=""
@@ -214,14 +244,14 @@ aicontainer() {
   if [ -n "$config_session" ]; then
     # セッションモード: 指定パスにディレクトリ構造を作成
     mkdir -p "$session_path/$ai_dir"
-    if [ "$1" != "codex" ]; then
+    if [ "$AI_TOOL" != "codex" ]; then
       [ ! -f "$session_path/$ai_dir/.claude.json" ] && echo '{}' > "$session_path/$ai_dir/.claude.json" || true
       mkdir -p "$session_path/$ai_dir/.claude"
     fi
   else
     # ディレクトリモード: 従来のローカルディレクトリを作成
     mkdir -p "$ai_dir"
-    if [ "$1" != "codex" ]; then
+    if [ "$AI_TOOL" != "codex" ]; then
       [ ! -f "$ai_dir/.claude.json" ] && echo '{}' > "$ai_dir/.claude.json" || true
       mkdir -p "$ai_dir/.claude"
     fi
@@ -321,16 +351,15 @@ aicontainer() {
   local extra_opts="--cap-add=NET_ADMIN --cap-add=NET_RAW"
   local shell_prefix="bash"
 
-  if [ "$1" = "dump" ]; then
+  if [ "$AI_TOOL" = "dump" ]; then
     dump_mode=true
     extra_env="-e CLAUDE_CODE_MAX_OUTPUT_TOKENS=64000 -e CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1"
-  elif [ "$1" = "ollama" ]; then
-    local model="${2:-}"
-    if [ -z "$model" ]; then
+  elif [ "$AI_TOOL" = "ollama" ]; then
+    if [ -z "$AI_TOOL_MODEL" ]; then
       echo "Error: model name required. Usage: aicontainer ollama <model>" >&2
       return 1
     fi
-    cmd="claude --dangerously-skip-permissions --disallowedTools WebSearch,WebFetch --model $model"
+    cmd="claude --dangerously-skip-permissions --disallowedTools WebSearch,WebFetch --model $AI_TOOL_MODEL"
     extra_env="-e ANTHROPIC_AUTH_TOKEN=ollama -e ANTHROPIC_BASE_URL=http://ollama:11434"
     # https://github.com/yumayo/nginx-open-webui-ollama
     # ネットワークを切り替えています。
@@ -338,19 +367,19 @@ aicontainer() {
     network="nginx-open-webui-ollama_internal_net"
     extra_opts="--entrypoint bash"
     shell_prefix=""
-  elif [ "$1" = "codex" ]; then
+  elif [ "$AI_TOOL" = "codex" ]; then
     # codex-cli (OpenAI Codex CLI)
     # 認証方法:
     #   1. ChatGPTアカウントでサインイン（Plus/Pro/Business/Enterprise契約者）
     #   2. OPENAI_API_KEYで認証（従量課金）
     # 初回起動時にcodex側でサインインを求められます
-    cmd="codex --full-auto"
+    cmd="codex --yolo"
     extra_env="-e FIREWALL_MODE=codex"
     if [ -n "$OPENAI_API_KEY" ]; then
       extra_env="$extra_env -e OPENAI_API_KEY=$OPENAI_API_KEY"
     fi
-  elif [ -n "$1" ]; then
-    cmd="$1"
+  elif [ -n "$AI_TOOL" ]; then
+    cmd="$AI_TOOL"
   else
     # claudeモード（デフォルト）
     extra_env="-e CLAUDE_CODE_MAX_OUTPUT_TOKENS=64000 -e CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1"
@@ -394,7 +423,7 @@ aicontainer() {
 
   if [ -n "$config_session" ]; then
     # セッションモード: ホストの指定パスをバインドマウント
-    if [ "$1" = "codex" ]; then
+    if [ "$AI_TOOL" = "codex" ]; then
       session_mounts="--mount type=bind,source=\"$session_path/$ai_dir\",target=/home/ubuntu/.codex"
     else
       session_mounts="--mount type=bind,source=\"$session_path/$ai_dir/.claude\",target=/home/ubuntu/.claude \\
@@ -413,7 +442,7 @@ aicontainer() {
     # ディレクトリモード: 従来のローカルディレクトリを使用
     # ワークスペース直下にai_dirが存在するため、AIがプロジェクトファイルと
     # 誤認しないようtmpfsで隠す（実際のデータは~/.claude等に個別マウント済み）
-    if [ "$1" = "codex" ]; then
+    if [ "$AI_TOOL" = "codex" ]; then
       session_mounts="--mount type=tmpfs,target=$workdir/$ai_dir,tmpfs-size=0 \\
     --mount type=bind,source=\"$workdir/$ai_dir\",target=/home/ubuntu/.codex"
     else
