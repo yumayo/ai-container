@@ -190,13 +190,41 @@ aicontainer() {
   local config_tool="${AICONTAINER_CONFIG[tool]:-}"
   local config_model="${AICONTAINER_CONFIG[model]:-}"
 
-  # ツールモードを決定（引数 > .aicontainer > デフォルト）
-  local AI_TOOL="${1:-}"
+  # ツールモードを決定（明示引数 > .aicontainer > デフォルト）
+  # 既知のツール名で始まらない場合は、引数をコンテナ内コマンドとして扱う。
+  local AI_TOOL=""
   local AI_TOOL_MODEL=""
+  local cmd_override=""
+  case "${1:-}" in
+    "" )
+      ;;
+    claude)
+      AI_TOOL="claude"
+      shift
+      ;;
+    codex)
+      AI_TOOL="codex"
+      shift
+      ;;
+    ollama)
+      AI_TOOL="ollama"
+      AI_TOOL_MODEL="${2:-}"
+      shift
+      [ $# -gt 0 ] && shift
+      ;;
+    dump)
+      AI_TOOL="dump"
+      shift
+      ;;
+    *)
+      cmd_override="$*"
+      ;;
+  esac
+
   if [ -z "$AI_TOOL" ] && [ -n "$config_tool" ]; then
     case "$config_tool" in
       claude)
-        # デフォルトと同じなので何もしない
+        AI_TOOL="claude"
         ;;
       codex)
         AI_TOOL="codex"
@@ -214,8 +242,6 @@ aicontainer() {
         return 1
         ;;
     esac
-  elif [ "$AI_TOOL" = "ollama" ]; then
-    AI_TOOL_MODEL="${2:-}"
   fi
 
   # モードに応じてディレクトリを決定
@@ -378,11 +404,13 @@ aicontainer() {
     if [ -n "$OPENAI_API_KEY" ]; then
       extra_env="$extra_env -e OPENAI_API_KEY=$OPENAI_API_KEY"
     fi
-  elif [ -n "$AI_TOOL" ]; then
-    cmd="$AI_TOOL"
   else
-    # claudeモード（デフォルト）
+    # claudeモード（デフォルト/明示指定）
     extra_env="-e CLAUDE_CODE_MAX_OUTPUT_TOKENS=64000 -e CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1"
+  fi
+
+  if [ -n "$cmd_override" ]; then
+    cmd="$cmd_override"
   fi
 
   # .aicontainerのenv設定を追加
