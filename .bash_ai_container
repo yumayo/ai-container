@@ -187,7 +187,6 @@ aicontainer() {
   local config_docker_proxy_allow="${AICONTAINER_CONFIG[docker-proxy-allow]:-}"
   local config_docker_proxy_containers="${AICONTAINER_CONFIG[docker-proxy-containers]:-}"
   local config_image="${AICONTAINER_CONFIG[image]:-yumayo-ai}"
-  local config_tool="${AICONTAINER_CONFIG[tool]:-}"
   local config_model="${AICONTAINER_CONFIG[model]:-}"
 
   # ツールモードを決定（明示引数 > .aicontainer > デフォルト）
@@ -195,6 +194,7 @@ aicontainer() {
   local AI_TOOL=""
   local AI_TOOL_MODEL=""
   local cmd_override=""
+  local dump_mode=false
   case "${1:-}" in
     "" )
       ;;
@@ -213,16 +213,45 @@ aicontainer() {
       [ $# -gt 0 ] && shift
       ;;
     dump)
-      AI_TOOL="dump"
+      dump_mode=true
       shift
+      case "${1:-}" in
+        "" )
+          ;;
+        claude)
+          AI_TOOL="claude"
+          cmd_override="claude --dangerously-skip-permissions --disallowedTools WebSearch,WebFetch"
+          shift
+          ;;
+        codex)
+          AI_TOOL="codex"
+          cmd_override="codex --yolo"
+          shift
+          ;;
+        ollama)
+          AI_TOOL="ollama"
+          if [ -z "${2:-}" ]; then
+            echo "Error: model name required. Usage: aicontainer dump ollama <model>" >&2
+            return 1
+          fi
+          AI_TOOL_MODEL="${2}"
+          config_model="${2}"
+          cmd_override="claude --dangerously-skip-permissions --disallowedTools WebSearch,WebFetch --model ${2}"
+          shift
+          shift
+          ;;
+        *)
+          cmd_override="$*"
+          ;;
+      esac
       ;;
     *)
       cmd_override="$*"
       ;;
   esac
 
-  if [ -z "$AI_TOOL" ] && [ -n "$config_tool" ]; then
-    case "$config_tool" in
+  if [ -z "$AI_TOOL" ] && [ -n "${AICONTAINER_CONFIG[tool]:-}" ]; then
+    case "${AICONTAINER_CONFIG[tool]}" in
       claude)
         AI_TOOL="claude"
         ;;
@@ -238,7 +267,7 @@ aicontainer() {
         AI_TOOL_MODEL="$config_model"
         ;;
       *)
-        echo "Error: unknown tool '$config_tool' in .aicontainer (expected: claude, codex, claude-ollama)" >&2
+        echo "Error: unknown tool '${AICONTAINER_CONFIG[tool]}' in .aicontainer (expected: claude, codex, claude-ollama)" >&2
         return 1
         ;;
     esac
@@ -363,7 +392,6 @@ aicontainer() {
   fi
 
   # 引数チェック
-  local dump_mode=false
   local cmd="claude --dangerously-skip-permissions --disallowedTools WebSearch,WebFetch"
   # プレフィックス付与: .aicontainer指定時は yumayo-ai-<name>、未指定時は yumayo-ai
   local network="yumayo-ai"
@@ -377,9 +405,15 @@ aicontainer() {
   local extra_opts="--cap-add=NET_ADMIN --cap-add=NET_RAW"
   local shell_prefix="bash"
 
-  if [ "$AI_TOOL" = "dump" ]; then
-    dump_mode=true
-    extra_env="-e CLAUDE_CODE_MAX_OUTPUT_TOKENS=64000 -e CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1"
+  if [ "$dump_mode" = true ]; then
+    if [ "$AI_TOOL" = "codex" ]; then
+      extra_env="-e FIREWALL_MODE=codex"
+      if [ -n "$OPENAI_API_KEY" ]; then
+        extra_env="$extra_env -e OPENAI_API_KEY=$OPENAI_API_KEY"
+      fi
+    else
+      extra_env="-e CLAUDE_CODE_MAX_OUTPUT_TOKENS=64000 -e CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1"
+    fi
   elif [ "$AI_TOOL" = "ollama" ]; then
     if [ -z "$AI_TOOL_MODEL" ]; then
       echo "Error: model name required. Usage: aicontainer ollama <model>" >&2
