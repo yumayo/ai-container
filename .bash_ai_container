@@ -1,5 +1,52 @@
 #!/bin/bash
 
+# カラー定義
+__AICONTAINER_RED='\033[0;31m'
+__AICONTAINER_GREEN='\033[0;32m'
+__AICONTAINER_YELLOW='\033[1;33m'
+__AICONTAINER_BLUE='\033[0;34m'
+__AICONTAINER_MAGENTA='\033[0;35m'
+__AICONTAINER_CYAN='\033[0;36m'
+__AICONTAINER_BOLD='\033[1m'
+__AICONTAINER_NC='\033[0m'
+
+__aicontainer_now() {
+  date '+%H:%M:%S'
+}
+
+__aicontainer_now_ms() {
+  date +%s%3N
+}
+
+__aicontainer_format_elapsed() {
+  local start_ms="$1"
+  local end_ms
+  end_ms="$(__aicontainer_now_ms)"
+
+  local elapsed_ms=$((end_ms - start_ms))
+  printf '%d.%03ds' $((elapsed_ms / 1000)) $((elapsed_ms % 1000))
+}
+
+__aicontainer_log_step() {
+  echo -e "${__AICONTAINER_BLUE}${__AICONTAINER_BOLD}[$(__aicontainer_now)] ▶ $1${__AICONTAINER_NC}"
+}
+
+__aicontainer_log_success() {
+  echo -e "${__AICONTAINER_GREEN}[$(__aicontainer_now)] ✓ $1${__AICONTAINER_NC}"
+}
+
+__aicontainer_log_info() {
+  echo -e "${__AICONTAINER_MAGENTA}[$(__aicontainer_now)] ℹ $1${__AICONTAINER_NC}"
+}
+
+__aicontainer_log_warning() {
+  echo -e "${__AICONTAINER_YELLOW}[$(__aicontainer_now)] ⚠ $1${__AICONTAINER_NC}"
+}
+
+__aicontainer_log_error() {
+  echo -e "${__AICONTAINER_RED}[$(__aicontainer_now)] ✗ $1${__AICONTAINER_NC}" >&2
+}
+
 # 1つのエントリーをAI_IGNOREに追加
 __aicontainer_add_ignore_entry() {
   local host_path="$1"
@@ -8,7 +55,7 @@ __aicontainer_add_ignore_entry() {
 
   # 重複チェック
   if [ -n "${AI_IGNORE_PATHS[$container_path]}" ]; then
-    echo "ignored (already): $message"
+    __aicontainer_log_info "ignored (already): $message"
     return
   fi
 
@@ -16,12 +63,12 @@ __aicontainer_add_ignore_entry() {
     AI_IGNORE="$AI_IGNORE \\
     --mount type=tmpfs,target=$container_path,tmpfs-size=0"
     AI_IGNORE_PATHS[$container_path]=1
-    echo "ignored: $message"
+    __aicontainer_log_info "ignored: $message"
   elif [ -f "$host_path" ]; then
     AI_IGNORE="$AI_IGNORE \\
     --mount type=bind,source=/dev/null,target=$container_path,readonly"
     AI_IGNORE_PATHS[$container_path]=1
-    echo "ignored: $message"
+    __aicontainer_log_info "ignored: $message"
   fi
 }
 
@@ -31,7 +78,7 @@ __aicontainer_process_aiignore_file() {
   local base_dir="$2"
   local mount_dst="$3"
 
-  echo "found .aiignore: $aiignore_file"
+  __aicontainer_log_info "found .aiignore: $aiignore_file"
 
   local aiignore_dir="$(dirname "$aiignore_file")"
 
@@ -73,16 +120,19 @@ __aicontainer_find_and_process_aiignores() {
 __aicontainer_run_hook() {
   local hook_name="$1"
   local hook_cmd="${AICONTAINER_CONFIG[$hook_name]:-}"
+  local started_at
 
   if [ -z "$hook_cmd" ]; then
     return 0
   fi
 
-  echo "hook($hook_name): $hook_cmd"
+  started_at="$(__aicontainer_now_ms)"
+  __aicontainer_log_step "hook($hook_name): $hook_cmd"
   if ! eval "$hook_cmd"; then
-    echo "Error: hook '$hook_name' failed" >&2
+    __aicontainer_log_error "hook '$hook_name' failed"
     return 1
   fi
+  __aicontainer_log_success "hook($hook_name): completed in $(__aicontainer_format_elapsed "$started_at")"
 }
 
 # .aicontainerファイルを解析してAICONTAINER_CONFIG連想配列に設定
@@ -93,7 +143,7 @@ __aicontainer_parse_config() {
     return
   fi
 
-  echo "found .aicontainer: loading configuration..."
+  __aicontainer_log_info "found .aicontainer: loading configuration..."
 
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%$'\r'}"
@@ -110,13 +160,13 @@ __aicontainer_parse_config() {
       # path, envキーは複数指定可能なため配列に蓄積
       if [ "$key" = "path" ]; then
         AICONTAINER_PATHS+=("$value")
-        echo "  config: $key=$value"
+        __aicontainer_log_info "config: $key=$value"
       elif [ "$key" = "env" ]; then
         AICONTAINER_ENVS+=("$value")
-        echo "  config: $key=$value"
+        __aicontainer_log_info "config: $key=$value"
       else
         AICONTAINER_CONFIG["$key"]="$value"
-        echo "  config: $key=$value"
+        __aicontainer_log_info "config: $key=$value"
       fi
     fi
   done < "$config_file"
@@ -126,8 +176,9 @@ __aicontainer_parse_config() {
 __aicontainer_ensure_network() {
   local net_name="$1"
   if ! docker network inspect "$net_name" &>/dev/null; then
-    echo "creating docker network: $net_name"
-    docker network create "$net_name" &>/dev/null || { echo "Error: failed to create network '$net_name'" >&2; return 1; }
+    __aicontainer_log_step "creating docker network: $net_name"
+    docker network create "$net_name" &>/dev/null || { __aicontainer_log_error "failed to create network '$net_name'"; return 1; }
+    __aicontainer_log_success "docker network ready: $net_name"
   fi
 }
 
@@ -143,15 +194,15 @@ __aicontainer_start_proxy() {
     current_allow="$(docker exec "$proxy_name" cat /etc/docker-proxy/allow.txt 2>/dev/null || true)"
     current_containers="$(docker exec "$proxy_name" cat /etc/docker-proxy/containers.txt 2>/dev/null || true)"
     if [ "$current_allow" = "$proxy_allow" ] && [ "$current_containers" = "$proxy_containers" ]; then
-      echo "docker-proxy($2): already running"
+      __aicontainer_log_info "docker-proxy($2): already running"
       return 0
     fi
-    echo "docker-proxy($2): config changed, restarting..."
+    __aicontainer_log_warning "docker-proxy($2): config changed, restarting..."
     docker stop "$proxy_name" &>/dev/null || true
     docker rm "$proxy_name" &>/dev/null || true
   fi
 
-  echo "docker-proxy($2): starting..."
+  __aicontainer_log_step "docker-proxy($2): starting..."
   docker rm "$proxy_name" 2>/dev/null || true
   docker volume create "$proxy_volume" &>/dev/null || true
   docker run -d \
@@ -168,11 +219,29 @@ __aicontainer_start_proxy() {
     sleep 0.2
     retries=$((retries + 1))
     if [ $retries -ge 25 ]; then
-      echo "Error: docker-proxy socket not ready" >&2
+      __aicontainer_log_error "docker-proxy socket not ready"
       return 1
     fi
   done
-  echo "docker-proxy($2): ready"
+  __aicontainer_log_success "docker-proxy($2): ready"
+}
+
+__aicontainer_prepare_mount() {
+  local src="$1"
+  local dst="$2"
+  local started_at
+
+  started_at="$(__aicontainer_now_ms)"
+  __aicontainer_log_step "mount start: $src -> $dst"
+
+  AI_MOUNT="$AI_MOUNT \\
+    --mount type=bind,source=$src,target=$dst"
+
+  if [ -d "$src" ]; then
+    __aicontainer_find_and_process_aiignores "$src" "$dst"
+  fi
+
+  __aicontainer_log_success "mount done:  $src -> $dst ($( __aicontainer_format_elapsed "$started_at"))"
 }
 
 aicontainer() {
@@ -292,7 +361,7 @@ aicontainer() {
     mkdir -p "$session_path"
     session_path="$(realpath "$session_path")"
     session_path="${session_path%/}"
-    echo "  session path: $session_path"
+    __aicontainer_log_info "session path: $session_path"
   fi
 
   # ディレクトリ構造を作成
@@ -314,7 +383,7 @@ aicontainer() {
 
   # .envファイルを読み込んで環境変数として設定（docker-compose.ymlと同様の挙動）
   if [ -f .env ]; then
-    echo "found .env: loading environment variables..."
+    __aicontainer_log_info "found .env: loading environment variables..."
     while IFS= read -r line || [ -n "$line" ]; do
       # CRを除去
       line="${line%$'\r'}"
@@ -333,7 +402,7 @@ aicontainer() {
           value="${BASH_REMATCH[1]}"
         fi
         export "$key=$value"
-        echo "  loaded: $key"
+        __aicontainer_log_info "loaded: $key"
       fi
     done < .env
   fi
@@ -342,7 +411,11 @@ aicontainer() {
   declare -A AI_IGNORE_PATHS
 
   # デフォルトのマウント配下の.aiignoreを再帰的に処理
+  local workspace_scan_started_at
+  workspace_scan_started_at="$(__aicontainer_now_ms)"
+  __aicontainer_log_step "workspace scan start: $(pwd)"
   __aicontainer_find_and_process_aiignores "." "$(pwd)"
+  __aicontainer_log_success "workspace scan done:  $(pwd) ($( __aicontainer_format_elapsed "$workspace_scan_started_at"))"
 
   AI_MOUNT=""
 
@@ -376,18 +449,12 @@ aicontainer() {
       [[ ! "$src" =~ ^/ ]] && src="$(pwd)/$src"
 
       if [ ! -e "$src" ]; then
-        echo "skip mount (not exists): $src"
+        __aicontainer_log_error "mount source not found: $src"
         return 1
       fi
 
       src="$(realpath "$src")"
-
-      AI_MOUNT="$AI_MOUNT \\
-    --mount type=bind,source=$src,target=$dst"
-      echo "mount: $src -> $dst"
-
-      # マウント元ディレクトリ内の.aiignoreを処理
-      [ -d "$src" ] && __aicontainer_find_and_process_aiignores "$src" "$dst"
+      __aicontainer_prepare_mount "$src" "$dst"
     done < .aimount
   fi
 
@@ -536,6 +603,8 @@ aicontainer() {
   else
     # before-start-up hookを実行
     __aicontainer_run_hook "before-start-up" || return 1
+    __aicontainer_log_step "container start: image=$config_image network=$network"
+    __aicontainer_log_info "workspace mount: $workdir -> $workdir"
     eval "$docker_cmd"
   fi
 }
