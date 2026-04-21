@@ -65,6 +65,21 @@ docker-proxy-allow=npx playwright,node # execで許可するコマンド（カ�
 docker-proxy-containers=myapp,mydb     # execを許可するコンテナ名（カンマ区切り、未指定で全拒否）
 ```
 
+### `.aibin/` — コンテナ内コマンドを追加
+
+`.aibin/` 直下の実行可能ファイルは、自動的にコンテナ内 `/usr/local/bin/<ファイル名>` へ readonly マウントされます。
+
+```sh
+mkdir -p .aibin
+cat > .aibin/playwright <<'EOF'
+#!/bin/sh
+docker compose exec playwright npx playwright "$@"
+EOF
+chmod +x .aibin/playwright
+```
+
+AIコンテナ内では `playwright test` のように直接実行できます。
+
 ### `.aimount` — 追加マウント
 
 ```
@@ -100,10 +115,21 @@ docker-proxy-name=playwright
 docker-proxy-allow=npx playwright
 ```
 
-3. `aicontainer` を起動し、AI内からコマンドを実行
+3. 必要なら `.aibin/playwright` を作成
 
 ```sh
-docker compose exec playwright npx playwright test
+mkdir -p .aibin
+cat > .aibin/playwright <<'EOF'
+#!/bin/sh
+docker compose exec playwright npx playwright "$@"
+EOF
+chmod +x .aibin/playwright
+```
+
+4. `aicontainer` を起動し、AI内からコマンドを実行
+
+```sh
+playwright test
 ```
 
 ### セキュリティ

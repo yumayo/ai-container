@@ -117,7 +117,7 @@ __aicontainer_process_aiignore_in_dir() {
   fi
 }
 
-# .aicontainerのhookを実行
+# .aicontainer の hook を実行
 __aicontainer_run_hook() {
   local hook_name="$1"
   local hook_cmd="${AICONTAINER_CONFIG[$hook_name]:-}"
@@ -136,9 +136,14 @@ __aicontainer_run_hook() {
   __aicontainer_log_success "hook($hook_name): completed in $(__aicontainer_format_elapsed "$started_at")"
 }
 
-# .aicontainerファイルを解析してAICONTAINER_CONFIG連想配列に設定
+# .aicontainer を解析してAICONTAINER_CONFIG連想配列に設定
 __aicontainer_parse_config() {
   local config_file=".aicontainer"
+
+  if [ -d "$config_file" ]; then
+    echo "Error: .aicontainer must be a file. Move settings out of the directory and into .aicontainer" >&2
+    return 1
+  fi
 
   if [ ! -f "$config_file" ]; then
     return
@@ -171,6 +176,39 @@ __aicontainer_parse_config() {
       fi
     fi
   done < "$config_file"
+}
+
+__aicontainer_prepare_aibin_mounts() {
+  local aibin_dir="$1"
+  local started_at
+
+  if [ ! -d "$aibin_dir" ]; then
+    return
+  fi
+
+  started_at="$(__aicontainer_now_ms)"
+  __aicontainer_log_step "aibin scan start: $aibin_dir"
+
+  local file
+  for file in "$aibin_dir"/*; do
+    [ -e "$file" ] || continue
+
+    if [ ! -f "$file" ]; then
+      __aicontainer_log_warning "aibin skipped (not a file): $file"
+      continue
+    fi
+
+    if [ ! -x "$file" ]; then
+      __aicontainer_log_warning "aibin skipped (not executable): $file"
+      continue
+    fi
+
+    AI_MOUNT="$AI_MOUNT \\
+    --mount type=bind,source=$file,target=/usr/local/bin/$(basename "$file"),readonly"
+    __aicontainer_log_info "aibin mounted: $(basename "$file") -> /usr/local/bin/$(basename "$file")"
+  done
+
+  __aicontainer_log_success "aibin scan done:  $aibin_dir ($( __aicontainer_format_elapsed "$started_at"))"
 }
 
 # Dockerネットワークが存在しない場合は作成する
@@ -246,11 +284,11 @@ __aicontainer_prepare_mount() {
 }
 
 aicontainer() {
-  # .aicontainerの設定を読み込み
+  # .aicontainer の設定を読み込み
   declare -A AICONTAINER_CONFIG
   AICONTAINER_PATHS=()
   AICONTAINER_ENVS=()
-  __aicontainer_parse_config
+  __aicontainer_parse_config || return 1
   local config_network="${AICONTAINER_CONFIG[network]:-}"
   local config_session="${AICONTAINER_CONFIG[session]:-}"
   local config_docker_proxy_name="${AICONTAINER_CONFIG[docker-proxy-name]:-}"
@@ -461,7 +499,7 @@ aicontainer() {
 
   # 引数チェック
   local cmd="claude --dangerously-skip-permissions --disallowedTools WebSearch,WebFetch"
-  # プレフィックス付与: .aicontainer指定時は yumayo-ai-<name>、未指定時は yumayo-ai
+  # プレフィックス付与: .aicontainer 指定時は yumayo-ai-<name>、未指定時は yumayo-ai
   local network="yumayo-ai"
   if [ -n "$config_network" ]; then
     network="yumayo-ai-$config_network"
@@ -515,7 +553,7 @@ aicontainer() {
     cmd="$cmd_override"
   fi
 
-  # .aicontainerのenv設定を追加
+  # .aicontainer の env 設定を追加
   if [ ${#AICONTAINER_ENVS[@]} -gt 0 ]; then
     for env_entry in "${AICONTAINER_ENVS[@]}"; do
       extra_env="$extra_env -e $env_entry"
@@ -537,7 +575,7 @@ aicontainer() {
   local session_mounts=""
   local init_cmd=""
 
-  # .aicontainerのpath設定をPATHに追加
+  # .aicontainer の path 設定をPATHに追加
   if [ ${#AICONTAINER_PATHS[@]} -gt 0 ]; then
     local extra_paths=""
     for p in "${AICONTAINER_PATHS[@]}"; do
@@ -550,6 +588,8 @@ aicontainer() {
     # .bashrcに書き込み（後続のシェルでもPATHが有効）+ 現在のシェルにもexport
     init_cmd="echo 'export PATH=${extra_paths}\\\$PATH' >> ~/.bashrc && export PATH=${extra_paths}\\\$PATH && "
   fi
+
+  __aicontainer_prepare_aibin_mounts "$workdir/.aibin"
 
   if [ -n "$config_session" ]; then
     # セッションモード: ホストの指定パスをバインドマウント
