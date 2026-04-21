@@ -106,14 +106,15 @@ __aicontainer_process_aiignore_file() {
   done < "$aiignore_file"
 }
 
-# ディレクトリ内の.aiignoreを再帰的に処理
-__aicontainer_find_and_process_aiignores() {
+# ディレクトリ直下の.aiignoreを処理
+__aicontainer_process_aiignore_in_dir() {
   local src_dir="$1"
   local mount_dst="$2"
+  local aiignore_file="$src_dir/.aiignore"
 
-  while read -r aiignore_file; do
+  if [ -f "$aiignore_file" ]; then
     __aicontainer_process_aiignore_file "$aiignore_file" "$src_dir" "$mount_dst"
-  done < <(find "$src_dir" -name .aiignore -type f)
+  fi
 }
 
 # .aicontainerのhookを実行
@@ -238,7 +239,7 @@ __aicontainer_prepare_mount() {
     --mount type=bind,source=$src,target=$dst"
 
   if [ -d "$src" ]; then
-    __aicontainer_find_and_process_aiignores "$src" "$dst"
+    __aicontainer_process_aiignore_in_dir "$src" "$dst"
   fi
 
   __aicontainer_log_success "mount done:  $src -> $dst ($( __aicontainer_format_elapsed "$started_at"))"
@@ -410,11 +411,11 @@ aicontainer() {
   AI_IGNORE=""
   declare -A AI_IGNORE_PATHS
 
-  # デフォルトのマウント配下の.aiignoreを再帰的に処理
+  # ワークスペース直下の.aiignoreを処理
   local workspace_scan_started_at
   workspace_scan_started_at="$(__aicontainer_now_ms)"
   __aicontainer_log_step "workspace scan start: $(pwd)"
-  __aicontainer_find_and_process_aiignores "." "$(pwd)"
+  __aicontainer_process_aiignore_in_dir "." "$(pwd)"
   __aicontainer_log_success "workspace scan done:  $(pwd) ($( __aicontainer_format_elapsed "$workspace_scan_started_at"))"
 
   AI_MOUNT=""
