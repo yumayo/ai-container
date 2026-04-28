@@ -178,7 +178,7 @@ __aicontainer_parse_config() {
   done < "$config_file"
 }
 
-__aicontainer_prepare_aibin_mounts() {
+__aicontainer_scan_aibin() {
   local aibin_dir="$1"
   local started_at
 
@@ -203,9 +203,7 @@ __aicontainer_prepare_aibin_mounts() {
       continue
     fi
 
-    AI_MOUNT="$AI_MOUNT \\
-    --mount type=bind,source=$file,target=/usr/local/bin/$(basename "$file"),readonly"
-    __aicontainer_log_info "aibin mounted: $(basename "$file") -> /usr/local/bin/$(basename "$file")"
+    __aicontainer_log_info "aibin command available: $(basename "$file")"
   done
 
   __aicontainer_log_success "aibin scan done:  $aibin_dir ($( __aicontainer_format_elapsed "$started_at"))"
@@ -575,9 +573,13 @@ aicontainer() {
   local session_mounts=""
   local init_cmd=""
 
-  # .aicontainer の path 設定をPATHに追加
+  # .aibin と .aicontainer の path 設定をPATHに追加
+  local extra_paths=""
+  if [ -d "$workdir/.aibin" ]; then
+    extra_paths="$workdir/.aibin:"
+  fi
+
   if [ ${#AICONTAINER_PATHS[@]} -gt 0 ]; then
-    local extra_paths=""
     for p in "${AICONTAINER_PATHS[@]}"; do
       # 相対パスはworkdir基準で絶対パスに変換
       if [[ ! "$p" =~ ^/ ]]; then
@@ -585,11 +587,14 @@ aicontainer() {
       fi
       extra_paths="${extra_paths}${p}:"
     done
+  fi
+
+  if [ -n "$extra_paths" ]; then
     # .bashrcに書き込み（後続のシェルでもPATHが有効）+ 現在のシェルにもexport
     init_cmd="echo 'export PATH=${extra_paths}\\\$PATH' >> ~/.bashrc && export PATH=${extra_paths}\\\$PATH && "
   fi
 
-  __aicontainer_prepare_aibin_mounts "$workdir/.aibin"
+  __aicontainer_scan_aibin "$workdir/.aibin"
 
   if [ -n "$config_session" ]; then
     # セッションモード: ホストの指定パスをバインドマウント

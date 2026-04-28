@@ -67,7 +67,8 @@ docker-proxy-containers=myapp,mydb     # execを許可するコンテナ名（�
 
 ### `.aibin/` — コンテナ内コマンドを追加
 
-`.aibin/` 直下の実行可能ファイルは、自動的にコンテナ内 `/usr/local/bin/<ファイル名>` へ readonly マウントされます。
+`.aibin/` 直下の実行可能ファイルは、コンテナ起動時に PATH の先頭へ追加されます。
+同名コマンドが他の PATH に存在する場合も `.aibin/` が最優先です。
 
 ```sh
 mkdir -p .aibin
