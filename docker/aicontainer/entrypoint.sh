@@ -26,7 +26,7 @@ log_error() {
 # Run firewall initialization with mode (default: claude)
 FIREWALL_MODE="${FIREWALL_MODE:-claude}"
 log_step "Initializing firewall (mode: $FIREWALL_MODE)..."
-if sudo /usr/local/bin/init-firewall.sh "$FIREWALL_MODE"; then
+if sudo /usr/local/bin/init-firewall.sh "$FIREWALL_MODE" "${AICONTAINER_ALLOWED_IPS:-}"; then
     log_success "Firewall initialization complete"
 else
     log_error "Firewall initialization failed"

@@ -56,6 +56,7 @@ node_modules
 
 ```
 network=myproject                      # Dockerネットワーク名（yumayo-ai-myproject）
+allow-ip=172.20.0.0/16                 # 通信を追加許可するIPv4アドレス/CIDR（複数行指定可）
 session=../                            # セッション共有パス（複数プロジェクトで共有可能）
 image=yumayo-ai-custom                 # 使用するDockerイメージ（デフォルト: yumayo-ai）
 tool=claude                            # 既定ツール（claude / codex / claude-ollama）
@@ -65,6 +66,37 @@ before-start-up=./setup.sh             # コンテナ起動前にホスト側で
 docker-proxy-name=myproject            # Docker Socket Proxyを有効化（プロキシ名を指定）
 docker-proxy-allow=npx playwright,node # execで許可するコマンド（カンマ区切り）
 docker-proxy-containers=myapp,mydb     # execを許可するコンテナ名（カンマ区切り、未指定で全拒否）
+```
+
+`allow-ip` は、指定したIPv4アドレスまたはCIDR範囲との送受信を全ポートで許可します。
+1行に1件指定でき、既存の許可ルール（APIドメイン、ゲートウェイを含む `/24` など）に追加されます。
+未指定の場合は従来の動作です。IPv6やホスト名には対応していません。不正な値は起動時にエラーになります。
+
+例えば、`yumayo-ai-myproject` のサブネットが `172.20.0.0/16` の場合:
+
+```ini
+network=myproject
+allow-ip=172.20.0.0/16
+allow-ip=192.168.1.10
+```
+
+実際のサブネットはホスト側で確認できます。上記のIP範囲は環境に合わせて変更してください。
+
+```sh
+docker network inspect yumayo-ai-myproject --format '{{range .IPAM.Config}}{{println .Subnet}}{{end}}'
+```
+
+この例では、同じネットワークに参加し、名前またはエイリアスが `mcp` のコンテナで
+サーバーが `0.0.0.0:3000` で待ち受けていれば、AIコンテナから `http://mcp:3000` に接続できます。
+`allow-ip` は通信の許可設定です。接続先への経路やDockerネットワークへの参加は別途必要です。
+`aicontainer ollama`（`tool=claude-ollama`）はファイアウォール初期化を行わないため、この設定は適用されません。
+
+この機能を既存環境に反映するには、イメージを再ビルドし、起動用関数を読み込み直してください。
+`~/.bash_ai_container` にコピーして利用している場合は、そのファイルも更新してください。
+
+```sh
+bash install.sh main
+source .bash_ai_container
 ```
 
 ### `.aibin/` — コンテナ内コマンドを追加
@@ -159,7 +191,11 @@ docker compose exec myapp /usr/bin/npx playwright test  # OK（フルパスで�
 
 ## セキュリティ
 
-コンテナのネットワークはファイアウォールで制限されており、AIツールのAPIドメインのみ通信可能です。
+通常のClaude Code / Codex CLIモードでは、ファイアウォールで通信を制限しています。
+AIツールのAPIドメインの解決先IPv4、DNS（UDP 53）、SSH（TCP 22）、localhost、
+デフォルトゲートウェイを含む `/24`、および `allow-ip` で追加したIPv4アドレス/CIDRとの通信を許可します。
+`allow-ip` の許可範囲が広いほど、通信可能な接続先も増えます。
+Ollamaモードは別ネットワークを使用し、このファイアウォール初期化を行いません。
 
 ## アンインストール
 
