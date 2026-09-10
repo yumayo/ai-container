@@ -33,6 +33,8 @@ aicontainer bash         # .aicontainer の tool を維持して bash を起動
 
 認証情報・チャット履歴はモードごとに `.claude.local` / `.codex.local` / `.claude.ollama` へ分離保存されます。
 
+Codex CLI は WebSearch を無効化した状態（`web_search=disabled`）で起動します。
+
 ## 設定ファイル
 
 プロジェクトルートに配置して動作をカスタマイズできます。いずれも任意で、なくても動作します。

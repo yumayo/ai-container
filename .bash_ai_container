@@ -331,7 +331,7 @@ aicontainer() {
           ;;
         codex)
           AI_TOOL="codex"
-          cmd_override="codex --yolo"
+          cmd_override="codex --yolo -c web_search=disabled"
           shift
           ;;
         ollama)
@@ -537,7 +537,7 @@ aicontainer() {
     #   1. ChatGPTアカウントでサインイン（Plus/Pro/Business/Enterprise契約者）
     #   2. OPENAI_API_KEYで認証（従量課金）
     # 初回起動時にcodex側でサインインを求められます
-    cmd="codex --yolo"
+    cmd="codex --yolo -c web_search=disabled"
     extra_env="-e FIREWALL_MODE=codex"
     if [ -n "$OPENAI_API_KEY" ]; then
       extra_env="$extra_env -e OPENAI_API_KEY=$OPENAI_API_KEY"
