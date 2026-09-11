@@ -37,43 +37,6 @@ log_error() {
     echo -e "${RED}[$(log_now)] ✗ $1${NC}" >&2
 }
 
-validate_ipv4_range() {
-    local range="$1" part
-    local octet='(0|[1-9][0-9]{0,2})'
-    local -a parts
-    [[ "$range" =~ ^$octet\.$octet\.$octet\.$octet(/(0|[1-9][0-9]?))?$ ]] || return 1
-    IFS='./' read -r -a parts <<< "$range"
-    for part in "${parts[@]:0:4}"; do
-        ((part <= 255)) || return 1
-    done
-    if [[ "$range" == */* ]]; then
-        ((${range##*/} <= 32)) || return 1
-    fi
-    return 0
-}
-
-ipv4_to_number() {
-    local a b c d
-    IFS=. read -r a b c d <<< "$1"
-    echo "$(((a << 24) | (b << 16) | (c << 8) | d))"
-}
-
-is_allowed_ip() {
-    local ip="$1" range prefix mask network address
-    [[ "$ip" != */* ]] && validate_ipv4_range "$ip" || return 1
-    address=$(ipv4_to_number "$ip")
-    for range in "${ALLOWED_IPS[@]}"; do
-        prefix=32
-        [[ "$range" != */* ]] || prefix="${range##*/}"
-        network=$(ipv4_to_number "${range%/*}")
-        mask=$(((0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF))
-        if (( (address & mask) == (network & mask) )); then
-            return 0
-        fi
-    done
-    return 1
-}
-
 # モード引数の処理（デフォルト: claude）
 MODE="${1:-claude}"
 
@@ -91,22 +54,6 @@ case "$MODE" in
         exit 1
         ;;
 esac
-
-# 全件をルール変更前に検証する。第2引数はentrypointが渡すカンマ区切りのIPv4/CIDR。
-ALLOWED_IPS=()
-if [ -n "${2:-}" ]; then
-    if [[ ! "$2" =~ ^[0-9./]+(,[0-9./]+)*$ ]]; then
-        log_error "Invalid allow-ip list: specify IPv4 addresses or CIDRs"
-        exit 1
-    fi
-    IFS=, read -r -a ALLOWED_IPS <<< "$2"
-    for range in "${ALLOWED_IPS[@]}"; do
-        if ! validate_ipv4_range "$range"; then
-            log_error "Invalid allow-ip '$range': expected an IPv4 address or CIDR with prefix 0-32"
-            exit 1
-        fi
-    done
-fi
 
 log_info "Firewall mode: $MODE"
 log_info "Allowed domains: ${ALLOWED_DOMAINS[*]}"
@@ -182,12 +129,6 @@ log_info "Host network detected as: $HOST_NETWORK"
 iptables -A INPUT -s "$HOST_NETWORK" -j ACCEPT
 iptables -A OUTPUT -d "$HOST_NETWORK" -j ACCEPT
 
-for range in "${ALLOWED_IPS[@]}"; do
-    log_info "Allowing traffic to/from $range"
-    iptables -A INPUT -s "$range" -j ACCEPT
-    iptables -A OUTPUT -d "$range" -j ACCEPT
-done
-
 # Set default policies to DROP first
 iptables -P INPUT DROP
 iptables -P FORWARD DROP
@@ -206,14 +147,10 @@ iptables -A OUTPUT -j REJECT --reject-with icmp-admin-prohibited
 log_success "Firewall configuration complete"
 log_step "Verifying firewall rules..."
 
-# 明示的に許可した範囲に検証先が含まれる場合は、接続成功をエラーにしない。
-if VERIFY_IP=$(curl -4 --connect-timeout 5 -o /dev/null -w '%{remote_ip}' https://example.com 2>/dev/null); then
-    if is_allowed_ip "$VERIFY_IP"; then
-        log_info "Blocked-access verification skipped: https://example.com ($VERIFY_IP) is in an allowed IP range"
-    else
-        log_error "Firewall verification failed - was able to reach https://example.com"
-        exit 1
-    fi
+# 許可されていないドメインへのアクセスが拒否されることを確認
+if curl --connect-timeout 5 https://example.com >/dev/null 2>&1; then
+    log_error "Firewall verification failed - was able to reach https://example.com"
+    exit 1
 else
     log_success "Firewall verification passed - unable to reach https://example.com as expected"
 fi
