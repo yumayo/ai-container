@@ -163,12 +163,21 @@ __aicontainer_parse_config() {
       if [[ "$value" =~ ^\"(.*)\"$ ]] || [[ "$value" =~ ^\'(.*)\'$ ]]; then
         value="${BASH_REMATCH[1]}"
       fi
-      # path, envキーは複数指定可能なため配列に蓄積
+      # path, env, dnsキーは複数指定可能なため配列に蓄積
       if [ "$key" = "path" ]; then
         AICONTAINER_PATHS+=("$value")
         __aicontainer_log_info "config: $key=$value"
       elif [ "$key" = "env" ]; then
         AICONTAINER_ENVS+=("$value")
+        __aicontainer_log_info "config: $key=$value"
+      elif [ "$key" = "dns" ]; then
+        # Dockerのコンテナ名・エイリアス・ドメイン名を1行に1つ指定する。
+        value="${value%"${value##*[![:space:]]}"}"
+        if [[ ! "$value" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$ ]] || [ ${#value} -gt 253 ]; then
+          __aicontainer_log_error "invalid dns name: $value"
+          return 1
+        fi
+        AICONTAINER_DNS+=("$value")
         __aicontainer_log_info "config: $key=$value"
       else
         AICONTAINER_CONFIG["$key"]="$value"
@@ -286,6 +295,7 @@ aicontainer() {
   declare -A AICONTAINER_CONFIG
   AICONTAINER_PATHS=()
   AICONTAINER_ENVS=()
+  local -a AICONTAINER_DNS=()
   __aicontainer_parse_config || return 1
   local config_network="${AICONTAINER_CONFIG[network]:-}"
   local config_session="${AICONTAINER_CONFIG[session]:-}"
@@ -633,6 +643,11 @@ aicontainer() {
     extra_env="$extra_env -e DOCKER_HOST=unix:///var/run/docker-proxy/docker.sock"
   fi
 
+  # 起動時のDNS設定を読み取り専用で渡し、コンテナ内からの許可先追加を防ぐ。
+  if [ ${#AICONTAINER_DNS[@]} -gt 0 ]; then
+    extra_opts="$extra_opts --mount type=bind,source=\"\$aicontainer_dns_file\",target=/etc/aicontainer/dns,readonly"
+  fi
+
   local docker_cmd="docker run -ti --rm \\
     --stop-timeout 0 \\
     --network $network \\
@@ -643,6 +658,19 @@ aicontainer() {
     $session_mounts$AI_MOUNT$AI_IGNORE \\
     $config_image \\
     $shell_prefix -ci \"${init_cmd}$cmd\""
+
+  if [ ${#AICONTAINER_DNS[@]} -gt 0 ]; then
+    local dns_values
+    printf -v dns_values '%q ' "${AICONTAINER_DNS[@]}"
+    # 一時ファイルはコンテナ終了時に削除する。dumpでも準備を含む実行可能なコマンドを出力する。
+    docker_cmd="(
+      aicontainer_dns_file=\$(mktemp /tmp/aicontainer-dns.XXXXXX) || exit 1
+      trap 'rm -f \"\$aicontainer_dns_file\"' EXIT
+      printf '%s\\n' $dns_values > \"\$aicontainer_dns_file\" || exit 1
+      chmod 0444 \"\$aicontainer_dns_file\" || exit 1
+      $docker_cmd
+    )"
+  fi
 
   if [ "$dump_mode" = true ]; then
     echo "$docker_cmd"

@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# https://raw.githubusercontent.com/anthropics/claude-code/refs/heads/main/.devcontainer/init-firewall.sh
+# 参考: https://raw.githubusercontent.com/anthropics/claude-code/refs/heads/main/.devcontainer/init-firewall.sh
 
-set -euo pipefail  # Exit on error, undefined vars, and pipeline failures
-IFS=$'\n\t'       # Stricter word splitting
+set -euo pipefail  # コマンド失敗・未定義変数の参照・パイプラインの失敗時に終了する
+IFS=$'\n\t'       # 単語の区切り文字を改行とタブに限定する
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -55,105 +55,148 @@ case "$MODE" in
         ;;
 esac
 
+# .aicontainerのdns設定は、ホスト側で作成した読み取り専用ファイルから取得する。
+# 引数や環境変数からは追加せず、sudoで再実行しても許可先を増やせないようにする。
+if [ -f /etc/aicontainer/dns ]; then
+    while IFS= read -r domain || [ -n "$domain" ]; do
+        domain="${domain,,}"
+        if [[ ! "$domain" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$ ]] || [ ${#domain} -gt 253 ]; then
+            log_error "Invalid DNS name: $domain"
+            exit 1
+        fi
+        for existing_domain in "${ALLOWED_DOMAINS[@]}"; do
+            [ "$domain" = "$existing_domain" ] && continue 2
+        done
+        ALLOWED_DOMAINS+=("$domain")
+    done < /etc/aicontainer/dns
+fi
+
 log_info "Firewall mode: $MODE"
 log_info "Allowed domains: ${ALLOWED_DOMAINS[*]}"
 
-# 1. Extract Docker DNS info BEFORE any flushing
-DOCKER_DNS_RULES=$(iptables-save -t nat | grep "127\.0\.0\.11" || true)
-
-# Flush existing rules and delete existing ipsets
-iptables -F
-iptables -X
-iptables -t nat -F
-iptables -t nat -X
-iptables -t mangle -F
-iptables -t mangle -X
-ipset destroy allowed-domains 2>/dev/null || true
-
-# 2. Selectively restore ONLY internal Docker DNS resolution
-if [ -n "$DOCKER_DNS_RULES" ]; then
-    log_step "Restoring Docker DNS rules..."
-    iptables -t nat -N DOCKER_OUTPUT 2>/dev/null || true
-    iptables -t nat -N DOCKER_POSTROUTING 2>/dev/null || true
-    echo "$DOCKER_DNS_RULES" | xargs -L 1 iptables -t nat
-else
-    log_warning "No Docker DNS rules to restore"
-fi
-
-# First allow DNS and localhost before any restrictions
-# Allow outbound DNS
-iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
-# Allow inbound DNS responses
-iptables -A INPUT -p udp --sport 53 -j ACCEPT
-# Allow localhost
-iptables -A INPUT -i lo -j ACCEPT
-iptables -A OUTPUT -o lo -j ACCEPT
-
-# Create ipset with CIDR support
-ipset create allowed-domains hash:net
-
-# Resolve and add allowed domains
-for domain in "${ALLOWED_DOMAINS[@]}"; do
+# ファイアウォールを変更する前に、必要な名前をすべて解決する。
+# getentは/etc/hostsも参照するため、DNSを無効化した後も再実行できる。
+# 拒否確認用ドメインも解決し、疎通確認時にIP制限による拒否を検証できるようにする。
+# これにより、DNSが使えないことによる失敗を、IP制限の成功と誤判定するのを防ぐ。
+BLOCKED_DOMAIN="example.com"
+declare -A DOMAIN_IPS
+RESOLVED_DOMAINS=()
+for domain in "${ALLOWED_DOMAINS[@]}" "$BLOCKED_DOMAIN"; do
+    # 同じ名前が複数回指定されても、名前解決は1回だけ行う。
+    [ -n "${DOMAIN_IPS[$domain]:-}" ] && continue
     log_step "Resolving $domain..."
-    ips=$(dig +noall +answer A "$domain" | awk '$4 == "A" {print $5}')
-    if [ -z "$ips" ]; then
+    if ! ips=$(getent ahostsv4 "$domain" | awk '{print $1}' | sort -u) || [ -z "$ips" ]; then
         log_error "Failed to resolve $domain"
         exit 1
     fi
 
     while read -r ip; do
         if [[ ! "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-            log_error "Invalid IP from DNS for $domain: $ip"
+            log_error "Invalid IP from name resolution for $domain: $ip"
             exit 1
         fi
-        log_info "Adding $ip for $domain"
-        ipset add allowed-domains "$ip"
-    done < <(echo "$ips")
+        IFS=. read -r -a octets <<< "$ip"
+        for octet in "${octets[@]}"; do
+            if (( 10#$octet > 255 )); then
+                log_error "Invalid IP from name resolution for $domain: $ip"
+                exit 1
+            fi
+        done
+    done <<< "$ips"
+    DOMAIN_IPS["$domain"]="$ips"
+    RESOLVED_DOMAINS+=("$domain")
 done
 
-# Get host IP from default route
-HOST_IP=$(ip route | grep default | cut -d" " -f3)
-if [ -z "$HOST_IP" ]; then
-    log_error "Failed to detect host IP"
-    exit 1
-fi
+# このスクリプトが管理する行だけを更新し、Dockerや利用者が登録した行は保持する。
+HOSTS_BEGIN="# BEGIN ai-container firewall"
+HOSTS_END="# END ai-container firewall"
+HOSTS_TEMP=$(mktemp)
+trap 'rm -f "$HOSTS_TEMP"' EXIT
+awk -v begin="$HOSTS_BEGIN" -v end="$HOSTS_END" '
+    $0 == begin { managed = 1; next }
+    $0 == end { managed = 0; next }
+    !managed { print }
+' /etc/hosts > "$HOSTS_TEMP"
+printf '%s\n' "$HOSTS_BEGIN" >> "$HOSTS_TEMP"
+for domain in "${RESOLVED_DOMAINS[@]}"; do
+    while read -r ip; do
+        printf '%s\t%s\n' "$ip" "$domain" >> "$HOSTS_TEMP"
+    done <<< "${DOMAIN_IPS[$domain]}"
+done
+printf '%s\n' "$HOSTS_END" >> "$HOSTS_TEMP"
+# /etc/hostsはDockerのバインドマウントなので、同じファイルに内容を上書きする。
+cat "$HOSTS_TEMP" > /etc/hosts
+log_success "Required names saved to /etc/hosts"
 
-HOST_NETWORK=$(echo "$HOST_IP" | sed "s/\.[0-9]*$/.0\/24/")
-log_info "Host network detected as: $HOST_NETWORK"
+# ルールを初期化する前に、既定の動作を拒否に設定する。
+# 許可するアドレスはIPv4のみとし、IPv6経由での迂回を防ぐ。
+for firewall in iptables ip6tables; do
+    "$firewall" -P INPUT DROP
+    "$firewall" -P FORWARD DROP
+    "$firewall" -P OUTPUT DROP
+    "$firewall" -F
+    "$firewall" -X
+    "$firewall" -t nat -F
+    "$firewall" -t nat -X
+    "$firewall" -t mangle -F
+    "$firewall" -t mangle -X
+done
+ipset destroy allowed-domains 2>/dev/null || true
 
-# Set up remaining iptables rules
-iptables -A INPUT -s "$HOST_NETWORK" -j ACCEPT
-iptables -A OUTPUT -d "$HOST_NETWORK" -j ACCEPT
+# Docker内蔵DNSや自分自身のIPへの接続を含め、ループバック通信を拒否する。
+# Docker内蔵DNSのNATルールも復元しない。
+iptables -A INPUT -i lo -j DROP
+iptables -A OUTPUT -o lo -j REJECT --reject-with icmp-admin-prohibited
 
-# Set default policies to DROP first
-iptables -P INPUT DROP
-iptables -P FORWARD DROP
-iptables -P OUTPUT DROP
+# 許可済みの接続先も含め、DNSサーバーへの接続を拒否する。
+for protocol in udp tcp; do
+    iptables -A OUTPUT -p "$protocol" --dport 53 -j REJECT
+done
 
-# First allow established connections for already approved traffic
-iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+# CIDR形式に対応したIPアドレスの許可リストを作成する。
+ipset create allowed-domains hash:net
 
-# Then allow only specific outbound traffic to allowed domains
+# /etc/hostsに保存した許可ドメインのIPを登録する。拒否確認用ドメインは含めない。
+for domain in "${ALLOWED_DOMAINS[@]}"; do
+    while read -r ip; do
+        log_info "Adding $ip for $domain"
+        ipset add allowed-domains "$ip" -exist
+    done <<< "${DOMAIN_IPS[$domain]}"
+done
+
+# API・認証先とdns設定の名前から解決したIPへの通信を全ポートで許可する。
+# ただし、上で設定したDNSの拒否を優先する。
+# 応答の送信元IPも制限し、既存の接続が許可リストを迂回するのを防ぐ。
+iptables -A INPUT -m set --match-set allowed-domains src -m state --state ESTABLISHED -j ACCEPT
 iptables -A OUTPUT -m set --match-set allowed-domains dst -j ACCEPT
 
-# Explicitly REJECT all other outbound traffic for immediate feedback
+# その他の送信は明示的に拒否し、接続元へすぐにエラーを返す。
 iptables -A OUTPUT -j REJECT --reject-with icmp-admin-prohibited
+ip6tables -A OUTPUT -j REJECT --reject-with icmp6-adm-prohibited
 
 log_success "Firewall configuration complete"
 log_step "Verifying firewall rules..."
 
-# 許可されていないドメインへのアクセスが拒否されることを確認
-if curl --connect-timeout 5 https://example.com >/dev/null 2>&1; then
-    log_error "Firewall verification failed - was able to reach https://example.com"
+# 追加のdns設定と重複しないIPを選び、通信の拒否を確認する。
+BLOCKED_IP=""
+while read -r ip; do
+    if ! ipset test allowed-domains "$ip" >/dev/null 2>&1; then
+        BLOCKED_IP="$ip"
+        break
+    fi
+done <<< "${DOMAIN_IPS[$BLOCKED_DOMAIN]}"
+if [ -z "$BLOCKED_IP" ]; then
+    log_warning "Skipping blocked-domain verification: all IPs for $BLOCKED_DOMAIN are allowed"
+elif curl --noproxy '*' --connect-timeout 5 --resolve "$BLOCKED_DOMAIN:443:$BLOCKED_IP" "https://$BLOCKED_DOMAIN" >/dev/null 2>&1; then
+    log_error "Firewall verification failed - was able to reach https://$BLOCKED_DOMAIN"
     exit 1
 else
-    log_success "Firewall verification passed - unable to reach https://example.com as expected"
+    log_success "Firewall verification passed - unable to reach https://$BLOCKED_DOMAIN as expected"
 fi
 
 # 許可されたドメインへのアクセスを確認
 VERIFY_DOMAIN="${ALLOWED_DOMAINS[0]}"
-if ! curl --connect-timeout 5 "https://$VERIFY_DOMAIN" >/dev/null 2>&1; then
+if ! curl --noproxy '*' --connect-timeout 5 "https://$VERIFY_DOMAIN" >/dev/null 2>&1; then
     log_error "Firewall verification failed - unable to reach https://$VERIFY_DOMAIN"
     exit 1
 else

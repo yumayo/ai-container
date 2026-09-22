@@ -67,6 +67,18 @@ docker-proxy-allow=npx playwright,node # execで許可するコマンド（カ�
 docker-proxy-containers=myapp,mydb     # execを許可するコンテナ名（カンマ区切り、未指定で全拒否）
 ```
 
+`dns` には、追加で接続を許可するコンテナ名・ネットワークエイリアス・ドメイン名を1行に1つ指定できます。
+
+```
+network=myproject
+dns=postgres
+dns=redis
+```
+
+コンテナ起動時に、指定したDockerネットワークのDNSを使ってIPv4アドレスを解決し、`/etc/hosts` とIP許可リストに登録します。接続先のコンテナは先に起動してください。名前解決に失敗した場合はAIコンテナの起動を中止します。モード別のAnthropic／OpenAIのAPI・認証先は自動で登録されます。
+
+同じDockerネットワークでも、`dns` に指定していない接続先のIPは許可しません。設定や接続先のIPを更新した場合はAIコンテナを再作成してください。
+
 ### `.aibin/` — コンテナ内コマンドを追加
 
 `.aibin/` 直下の実行可能ファイルは、コンテナ起動時に PATH の先頭へ追加されます。
@@ -159,7 +171,11 @@ docker compose exec myapp /usr/bin/npx playwright test  # OK（フルパスで�
 
 ## セキュリティ
 
-コンテナのネットワークはファイアウォールで制限されており、AIツールのAPIドメインのみ通信可能です。
+接続先は、モード別のAnthropic／OpenAIのAPI・認証先と、`.aicontainer` の `dns` に指定した名前から解決したIPv4アドレスに限定しています。登録済みIPへの送信とその応答は、DNS（UDP/TCP 53番）を除き全ポートで許可します。localhost、自分自身のIP、未登録のIP、IPv6通信は拒否します。
+
+起動時に必要なドメインのIPv4アドレスを解決して `/etc/hosts` に登録し、その後はDNS通信（UDP/TCP 53番ポート）とDocker内蔵DNSへの接続を拒否します。IPアドレスを更新する場合はコンテナを再作成してください。
+
+Dockerサブネット全体を許可するルールはありません。Dockerホストのゲートウェイや他コンテナも、IP許可リストに登録されていなければ拒否します。`dns` の設定は起動時のコピーを読み取り専用で渡すため、実行中にワークスペースの `.aicontainer` を編集しても許可先は増えません。
 
 ## アンインストール
 
