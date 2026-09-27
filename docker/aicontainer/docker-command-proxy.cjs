@@ -178,7 +178,10 @@ async function main() {
   if (!Array.isArray(containers)) throw new Error('Invalid Docker containers response');
   // 一覧はプロキシが許可済み・起動中コンテナだけにフィルタする。
   const visible = new Set(containers.flatMap((c) => c.Names || []).map((n) => n.replace(/^\//, '')));
-  const configured = (process.env.DOCKER_PROXY_CONTAINERS || '').split(',').map((n) => n.trim()).filter(Boolean);
+  const configured = (process.env.DOCKER_PROXY_CONTAINERS || '')
+    .replaceAll('\r\n', '\n')
+    .replaceAll('\r', '\n')
+    .split('\n').map((n) => n.trim()).filter(Boolean);
   const targets = [...new Set(configured.length ? configured : visible)].filter((n) => visible.has(n));
   const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY && process.stderr.isTTY);
   for (const container of targets) {

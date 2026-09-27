@@ -63,9 +63,13 @@ path=./bin                             # コンテナ内PATHに追加（複数�
 env=CLAUDE_CODE_EFFORT_LEVEL=max       # コンテナに環境変数を追加（複数行指定可）
 before-start-up=./setup.sh             # コンテナ起動前にホスト側で実行するコマンド
 docker-proxy-name=myproject            # Docker Socket Proxyを有効化（プロキシ名を指定）
-docker-proxy-allow=npx playwright,node # execで許可するコマンド（カンマ区切り）
-docker-proxy-containers=myapp,mydb     # execを許可するコンテナ名（カンマ区切り、記載順で転送、未指定で全拒否）
+docker-proxy-allow=npx playwright*     # execで許可するコマンド（1行1ルール、複数行指定可）
+docker-proxy-allow=node
+docker-proxy-containers=myapp         # execを許可するコンテナ名（複数行指定可、記載順で転送）
+docker-proxy-containers=mydb
 ```
+
+`docker-proxy-allow` と `docker-proxy-containers` は同じキーを複数行書いて指定します。未指定時はそれぞれ全コマンド・全コンテナを拒否します。従来のカンマ区切りの設定は、1項目につき1行へ書き換えてください。空の定義は無視します。
 
 `dns` には、追加で接続を許可するコンテナ名・ネットワークエイリアス・ドメイン名を1行に1つ指定できます。
 
@@ -113,8 +117,10 @@ docker compose up -d
 
 ```
 docker-proxy-name=myproject
-docker-proxy-allow=python,pytest
-docker-proxy-containers=myapp,mytools
+docker-proxy-allow=python
+docker-proxy-allow=pytest
+docker-proxy-containers=myapp
+docker-proxy-containers=mytools
 ```
 
 3. `aicontainer` を起動し、AIコンテナ内のBashからコマンドを実行
@@ -159,7 +165,7 @@ docker rm mycontainer         # 403 Forbidden
 **コマンドレベル**: `docker-proxy-allow` で指定したコマンドのみ `docker exec` で実行できます。未指定の場合、全てのコマンドが拒否されます。コマンド名に続けて引数も指定でき、コマンド列の先頭から照合します。一致した後の追加引数は許可します。
 
 ```sh
-# docker-proxy-allow=npx playwright,node の場合
+# docker-proxy-allow=npx playwright と docker-proxy-allow=node を別々の行で指定した場合
 docker compose exec myapp npx playwright test  # OK（npx playwright に一致）
 docker compose exec myapp npx webpack          # 403 Forbidden
 docker compose exec myapp node script.js       # OK（node に一致）
@@ -170,7 +176,8 @@ docker compose exec myapp /usr/bin/npx playwright test  # OK（フルパスで�
 コマンド名と引数には `*` を指定できます。`*` は0文字以上の任意の文字に一致し、引数の境界は越えません。`?` や `[]` はワイルドカードとして扱いません。
 
 ```ini
-docker-proxy-allow=python*,npx playwright*
+docker-proxy-allow=python*
+docker-proxy-allow=npx playwright*
 # python / python3 / python3.12、npx playwright / npx playwright@latest などを許可
 ```
 

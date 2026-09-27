@@ -63,12 +63,37 @@ func TestMatchRule(t *testing.T) {
 
 func TestLoadWildcardAllowList(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "allow.txt")
-	if err := os.WriteFile(file, []byte(" python*, npx playwright*, *, , "), 0600); err != nil {
+	if err := os.WriteFile(file, []byte(" python*\r npx playwright*\n tool --items=a,b\r\n *\r\n\n "), 0600); err != nil {
 		t.Fatal(err)
 	}
-	want := []allowRule{{"python*"}, {"npx", "playwright*"}, {"*"}}
+	want := []allowRule{{"python*"}, {"npx", "playwright*"}, {"tool", "--items=a,b"}, {"*"}}
 	if got := loadAllowList(file); !reflect.DeepEqual(got, want) {
 		t.Fatalf("loadAllowList() = %q, want %q", got, want)
+	}
+}
+
+func TestLoadContainerList(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		want []string
+	}{
+		{"ordered lines", " tools\r\n\n app \n db ", []string{"tools", "app", "db"}},
+		{"carriage returns", "tools\rapp\rdb", []string{"tools", "app", "db"}},
+		{"mixed line endings", "tools\rapp\ndb\r\nextra", []string{"tools", "app", "db", "extra"}},
+		{"empty list", " \r\n\n ", nil},
+		{"commas are not separators", "tools,app", []string{"tools,app"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			file := filepath.Join(t.TempDir(), "containers.txt")
+			if err := os.WriteFile(file, []byte(tt.data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if got := loadContainerList(file); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("loadContainerList() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

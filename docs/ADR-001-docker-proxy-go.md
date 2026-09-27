@@ -45,7 +45,7 @@ AI Container ──(Unix Socket)──> Go Proxy ──(Docker Socket)──> Do
 
 ### コンテナアクセス制御
 
-`DOCKER_PROXY_CONTAINERS` 環境変数（カンマ区切り）で、アクセスを許可するコンテナ名を指定する。未指定時は全コンテナへのアクセスを拒否（安全側デフォルト）。
+`DOCKER_PROXY_CONTAINERS` 環境変数（改行区切り）で、アクセスを許可するコンテナ名を指定する。`.aicontainer` では `docker-proxy-containers` を1コンテナにつき1行指定する。未指定時は全コンテナへのアクセスを拒否（安全側デフォルト）。
 
 - `containers/json`: レスポンスをフィルタし、許可コンテナのみ返す
 - `containers/{id}/json`, `containers/{id}/exec`: URLパスからコンテナ名/IDを抽出し、許可リストにない場合は403

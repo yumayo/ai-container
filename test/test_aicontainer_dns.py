@@ -30,9 +30,14 @@ root = Path(os.environ["DNS_CONFIG_TEST_DIR"])
 args = sys.argv[1:]
 if args[:2] == ["network", "inspect"]:
     sys.exit(0)
+if args[0] in ("ps", "rm", "volume", "exec"):
+    sys.exit(0)
 if args[0] != "run":
     raise AssertionError(args)
 record = {"args": args}
+if args[:2] == ["run", "-d"]:
+    (root / "proxy-calls.json").write_text(json.dumps(record))
+    sys.exit(0)
 for option in args:
     if "target=/etc/aicontainer/dns" in option:
         fields = dict(part.split("=", 1) for part in option.split(",") if "=" in part)
@@ -100,7 +105,7 @@ sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
 
     def test_proxy_container_order_is_passed_to_the_ai_container(self):
         self.config.write_text("docker-proxy-name=project\ndocker-proxy-allow=pytest\n"
-                               "docker-proxy-containers=tools, app\n")
+                               "docker-proxy-containers=tools\ndocker-proxy-containers=app\n")
         result = self.run_launcher("dump")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         command = result.stdout[result.stdout.index("docker run -ti --rm"):]
@@ -109,7 +114,53 @@ sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
         self.assertEqual(execution.returncode, 0, execution.stdout + execution.stderr)
         args = json.loads(self.calls.read_text())["args"]
         self.assertIn("DOCKER_HOST=unix:///var/run/docker-proxy/docker.sock", args)
-        self.assertIn("DOCKER_PROXY_CONTAINERS=tools, app", args)
+        self.assertIn("DOCKER_PROXY_CONTAINERS=tools\napp", args)
+
+    def test_repeated_proxy_definitions_reach_both_containers_without_shell_expansion(self):
+        self.config.write_text("docker-proxy-name=project\r\n"
+                               "docker-proxy-allow=python*\r\n"
+                               "docker-proxy-allow='npx playwright*'\r\n"
+                               "docker-proxy-allow=tool --items=a,b\r\n"
+                               "docker-proxy-allow=tool $(touch injected) `touch injected`\r\n"
+                               "docker-proxy-allow=   \r\n"
+                               "docker-proxy-containers='tools'\r\n"
+                               "docker-proxy-containers= \r\n"
+                               "docker-proxy-containers=app   ")
+        result = self.run_launcher()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        proxy_args = json.loads((self.root / "proxy-calls.json").read_text())["args"]
+        self.assertIn("DOCKER_PROXY_ALLOW=python*\nnpx playwright*\ntool --items=a,b\n"
+                      "tool $(touch injected) `touch injected`", proxy_args)
+        self.assertIn("DOCKER_PROXY_CONTAINERS=tools\napp", proxy_args)
+        ai_args = json.loads(self.calls.read_text())["args"]
+        self.assertIn("DOCKER_PROXY_CONTAINERS=tools\napp", ai_args)
+        self.assertFalse((self.root / "injected").exists())
+
+    def test_undefined_proxy_lists_are_passed_as_empty_values(self):
+        self.config.write_text("docker-proxy-name=project\n")
+        result = self.run_launcher()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        proxy_args = json.loads((self.root / "proxy-calls.json").read_text())["args"]
+        self.assertIn("DOCKER_PROXY_ALLOW=", proxy_args)
+        self.assertIn("DOCKER_PROXY_CONTAINERS=", proxy_args)
+        self.assertIn("DOCKER_PROXY_CONTAINERS=", json.loads(self.calls.read_text())["args"])
+
+    def test_proxy_definitions_are_reset_between_launches_in_the_same_shell(self):
+        self.config.write_text("docker-proxy-name=project\ndocker-proxy-allow=*\n"
+                               "docker-proxy-containers=old\n")
+        updated = ("docker-proxy-name=project\ndocker-proxy-allow=pytest\n"
+                   "docker-proxy-containers=tools\n")
+        result = subprocess.run(["bash", "-c",
+                                 'source "$1"; aicontainer || exit; '
+                                 'printf "%s" "$2" > .aicontainer; aicontainer',
+                                 "test", str(LAUNCHER), updated], cwd=self.root, env=self.env,
+                                text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        proxy_args = json.loads((self.root / "proxy-calls.json").read_text())["args"]
+        self.assertIn("DOCKER_PROXY_ALLOW=pytest", proxy_args)
+        self.assertIn("DOCKER_PROXY_CONTAINERS=tools", proxy_args)
+        ai_args = json.loads(self.calls.read_text())["args"]
+        self.assertIn("DOCKER_PROXY_CONTAINERS=tools", ai_args)
 
     def test_invalid_names_are_rejected_without_shell_evaluation(self):
         for name in ("", "postgres:5432", "postgres redis", "$(touch injected)",

@@ -105,7 +105,7 @@ async function fixture(t, options = {}) {
     const child = spawn(binary, command, {
         cwd: dir,
         env: { ...process.env, BASH_ENV: hook, DOCKER_HOST: `unix://${socketPath}`,
-          DOCKER_PROXY_CONTAINERS: containers.join(','), ...config.env },
+          DOCKER_PROXY_CONTAINERS: containers.join('\n'), ...config.env },
         stdio: ['pipe', 'pipe', 'pipe'],
       });
     const stdout = [], stderr = [];
@@ -121,13 +121,13 @@ async function fixture(t, options = {}) {
 }
 
 test('missing command tries configured containers and preserves argv, cwd, streams and exit code', async (t) => {
-  const { run, calls, dir } = await fixture(t, { absent: ['second'], exitCode: 7 });
+  const { run, calls, dir } = await fixture(t, { containers: ['first', 'second', 'third'], absent: ['second', 'third'], exitCode: 7 });
   const args = [missing, 'argument with spaces', '', '$(touch injected)', '"quoted"'];
-  const result = await run(args, { env: { DOCKER_PROXY_CONTAINERS: ' second, first ' } });
+  const result = await run(args, { env: { DOCKER_PROXY_CONTAINERS: ' second \r third \r\n\n first ' } });
   assert.deepEqual(result, { code: 7, stdout: 'stdout\n', stderr: 'stderr\n' });
   const creates = calls.filter((c) => c.path.startsWith('/containers/') && c.path.endsWith('/exec'));
-  assert.deepEqual(creates.map((c) => c.path), ['/containers/second/exec', '/containers/first/exec']);
-  assert.deepEqual(creates[1].body, {
+  assert.deepEqual(creates.map((c) => c.path), ['/containers/second/exec', '/containers/third/exec', '/containers/first/exec']);
+  assert.deepEqual(creates[2].body, {
     Cmd: args, WorkingDir: dir, AttachStdin: true, AttachStdout: true, AttachStderr: true, Tty: false,
   });
   await assert.rejects(fs.stat(path.join(dir, 'injected')), { code: 'ENOENT' });

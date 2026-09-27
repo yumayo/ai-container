@@ -42,8 +42,10 @@ func loadAllowList(filePath string) []allowRule {
 	if trimmed == "" {
 		return nil
 	}
+	trimmed = strings.ReplaceAll(trimmed, "\r\n", "\n")
+	trimmed = strings.ReplaceAll(trimmed, "\r", "\n")
 	var rules []allowRule
-	for _, part := range strings.Split(trimmed, ",") {
+	for _, part := range strings.Split(trimmed, "\n") {
 		tokens := strings.Fields(strings.TrimSpace(part))
 		if len(tokens) > 0 {
 			rules = append(rules, allowRule(tokens))
@@ -101,8 +103,10 @@ func loadContainerList(filePath string) []string {
 	if trimmed == "" {
 		return nil
 	}
+	trimmed = strings.ReplaceAll(trimmed, "\r\n", "\n")
+	trimmed = strings.ReplaceAll(trimmed, "\r", "\n")
 	var containers []string
-	for _, part := range strings.Split(trimmed, ",") {
+	for _, part := range strings.Split(trimmed, "\n") {
 		s := strings.TrimSpace(part)
 		if s != "" {
 			containers = append(containers, s)

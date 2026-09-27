@@ -163,7 +163,7 @@ __aicontainer_parse_config() {
       if [[ "$value" =~ ^\"(.*)\"$ ]] || [[ "$value" =~ ^\'(.*)\'$ ]]; then
         value="${BASH_REMATCH[1]}"
       fi
-      # path, env, dnsキーは複数指定可能なため配列に蓄積
+      # 複数指定可能なキーは配列に蓄積
       if [ "$key" = "path" ]; then
         AICONTAINER_PATHS+=("$value")
         __aicontainer_log_info "config: $key=$value"
@@ -178,6 +178,16 @@ __aicontainer_parse_config() {
           return 1
         fi
         AICONTAINER_DNS+=("$value")
+        __aicontainer_log_info "config: $key=$value"
+      elif [ "$key" = "docker-proxy-allow" ] || [ "$key" = "docker-proxy-containers" ]; then
+        value="${value#"${value%%[![:space:]]*}"}"
+        value="${value%"${value##*[![:space:]]}"}"
+        [ -n "$value" ] || continue
+        if [ "$key" = "docker-proxy-allow" ]; then
+          AICONTAINER_PROXY_ALLOW+=("$value")
+        else
+          AICONTAINER_PROXY_CONTAINERS+=("$value")
+        fi
         __aicontainer_log_info "config: $key=$value"
       else
         AICONTAINER_CONFIG["$key"]="$value"
@@ -265,12 +275,17 @@ aicontainer() {
   AICONTAINER_PATHS=()
   AICONTAINER_ENVS=()
   local -a AICONTAINER_DNS=()
+  local -a AICONTAINER_PROXY_ALLOW=()
+  local -a AICONTAINER_PROXY_CONTAINERS=()
   __aicontainer_parse_config || return 1
   local config_network="${AICONTAINER_CONFIG[network]:-}"
   local config_session="${AICONTAINER_CONFIG[session]:-}"
   local config_docker_proxy_name="${AICONTAINER_CONFIG[docker-proxy-name]:-}"
-  local config_docker_proxy_allow="${AICONTAINER_CONFIG[docker-proxy-allow]:-}"
-  local config_docker_proxy_containers="${AICONTAINER_CONFIG[docker-proxy-containers]:-}"
+  local config_docker_proxy_allow config_docker_proxy_containers
+  printf -v config_docker_proxy_allow '%s\n' "${AICONTAINER_PROXY_ALLOW[@]}"
+  config_docker_proxy_allow="${config_docker_proxy_allow%$'\n'}"
+  printf -v config_docker_proxy_containers '%s\n' "${AICONTAINER_PROXY_CONTAINERS[@]}"
+  config_docker_proxy_containers="${config_docker_proxy_containers%$'\n'}"
   local config_image="${AICONTAINER_CONFIG[image]:-yumayo-ai}"
   local config_model="${AICONTAINER_CONFIG[model]:-}"
 
