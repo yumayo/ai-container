@@ -641,6 +641,9 @@ aicontainer() {
   if [ -n "$config_docker_proxy_name" ]; then
     extra_opts="$extra_opts -v yumayo-ai-proxy-${config_docker_proxy_name}-sock:/var/run/docker-proxy"
     extra_env="$extra_env -e DOCKER_HOST=unix:///var/run/docker-proxy/docker.sock"
+    local proxy_containers_env
+    printf -v proxy_containers_env '%q' "DOCKER_PROXY_CONTAINERS=$config_docker_proxy_containers"
+    extra_env="$extra_env -e $proxy_containers_env"
   fi
 
   # 起動時のDNS設定を読み取り専用で渡し、コンテナ内からの許可先追加を防ぐ。

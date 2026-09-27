@@ -64,7 +64,7 @@ env=CLAUDE_CODE_EFFORT_LEVEL=max       # コンテナに環境変数を追加（
 before-start-up=./setup.sh             # コンテナ起動前にホスト側で実行するコマンド
 docker-proxy-name=myproject            # Docker Socket Proxyを有効化（プロキシ名を指定）
 docker-proxy-allow=npx playwright,node # execで許可するコマンド（カンマ区切り）
-docker-proxy-containers=myapp,mydb     # execを許可するコンテナ名（カンマ区切り、未指定で全拒否）
+docker-proxy-containers=myapp,mydb     # execを許可するコンテナ名（カンマ区切り、記載順で転送、未指定で全拒否）
 ```
 
 `dns` には、追加で接続を許可するコンテナ名・ネットワークエイリアス・ドメイン名を1行に1つ指定できます。
@@ -107,7 +107,7 @@ ${API_KEY?}:/workspace/api-key
 
 ## Docker Socket Proxy（外部コンテナ連携）
 
-Playwright などのツールをAIコンテナに入れず、ホスト上の別コンテナで実行して `docker compose exec` で呼び出せます。
+AIコンテナのBashで見つからないコマンドは、`docker-proxy-containers` に登録した起動中のコンテナへ自動転送します。転送プログラムはNode.jsの標準ライブラリだけで動作し、Docker CLIは不要です。既存の `docker exec` / `docker compose exec` による呼び出しも利用できます。
 
 ```
 AI Container ──(Unix Socket)──> Go Proxy ──(Docker Socket)──> Docker Engine
@@ -123,28 +123,40 @@ AI Container ──(Unix Socket)──> Go Proxy ──(Docker Socket)──> Do
 docker compose up -d
 ```
 
-2. `.aicontainer` に設定を追加
+2. `.aicontainer` に設定を追加（コンテナ名はDockerの実際の名前を指定）
 
 ```
-docker-proxy-name=playwright
-docker-proxy-allow=npx playwright
+docker-proxy-name=myproject
+docker-proxy-allow=python,pytest
+docker-proxy-containers=myapp,mytools
 ```
 
-3. 必要なら `.aibin/playwright` を作成
+3. `aicontainer` を起動し、AIコンテナ内のBashからコマンドを実行
 
 ```sh
-mkdir -p .aibin
-cat > .aibin/playwright <<'EOF'
-#!/bin/sh
-docker compose exec playwright npx playwright "$@"
-EOF
-chmod +x .aibin/playwright
+python script.py
+pytest tests/
+# 非対話Bash（AIツールからの実行）でも有効
+bash -c 'pytest tests/'
 ```
 
-4. `aicontainer` を起動し、AI内からコマンドを実行
+### 自動転送の動作
+
+- ローカルのPATHにあるコマンド、Bashの組み込み、関数、`.aibin/` のコマンドはそのまま実行します。
+- 見つからないコマンドを登録順に試し、転送先にも実行ファイルがない場合だけ次のコンテナへ進みます。実行後の終了コードが127でも再試行しません。
+- 引数、標準入力、標準出力、標準エラー、終了コードを引き継ぎます。対話端末ではTTYも利用できます。
+- 作業ディレクトリはAIコンテナの現在のディレクトリを指定します。転送先にも同じ絶対パスでプロジェクトをマウントしてください。`.aiignore` は転送先のマウントには適用されません。
+- 許可されていないコマンドは終了コード126、見つからないコマンドは127、接続や実行開始のエラーは125になります。
+- `/path/to/command` や `./command` の自動転送は行いません。Bash以外のシェルや、プログラムからの直接起動（`spawn` 等）にはこのフックは適用されません。
+
+`docker-proxy-allow=npx playwright` は実際のコマンド列 `npx playwright ...` を許可する設定です。`playwright` への名前変換は行いません。また、ローカルにある `npx` の起動後に発生するエラーは自動転送の対象外です。その場合は `.aibin/` にラッパーを作成し、`docker compose exec` などで明示的に呼び出せます。
+
+この機能はAIイメージに既存のツールが入っている構成でも利用できます。ベースイメージのインストール内容は従来どおりです。更新後は `bash install.sh main` と `bash install.sh proxy` でイメージを再ビルドし、起動済みのプロキシコンテナも作り直してください。
+
+転送処理のテストはDockerなしで実行できます。
 
 ```sh
-playwright test
+node --test test/test_docker_command_proxy.cjs
 ```
 
 ### セキュリティ

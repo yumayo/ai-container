@@ -98,6 +98,19 @@ sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("snapshot", json.loads(self.calls.read_text()))
 
+    def test_proxy_container_order_is_passed_to_the_ai_container(self):
+        self.config.write_text("docker-proxy-name=project\ndocker-proxy-allow=pytest\n"
+                               "docker-proxy-containers=tools, app\n")
+        result = self.run_launcher("dump")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        command = result.stdout[result.stdout.index("docker run -ti --rm"):]
+        execution = subprocess.run(["bash"], input=command, cwd=self.root, env=self.env,
+                                   text=True, capture_output=True)
+        self.assertEqual(execution.returncode, 0, execution.stdout + execution.stderr)
+        args = json.loads(self.calls.read_text())["args"]
+        self.assertIn("DOCKER_HOST=unix:///var/run/docker-proxy/docker.sock", args)
+        self.assertIn("DOCKER_PROXY_CONTAINERS=tools, app", args)
+
     def test_invalid_names_are_rejected_without_shell_evaluation(self):
         for name in ("", "postgres:5432", "postgres redis", "$(touch injected)",
                      "`touch injected`", "a" * 254):

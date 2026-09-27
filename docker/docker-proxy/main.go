@@ -256,7 +256,7 @@ func (p *proxy) handleContainersList(w http.ResponseWriter, r *http.Request) {
 			return nil
 		}
 
-		var filtered []map[string]interface{}
+		filtered := make([]map[string]interface{}, 0)
 		for _, c := range containers {
 			if p.isContainerVisible(c) {
 				filtered = append(filtered, c)

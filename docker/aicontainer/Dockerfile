@@ -9,6 +9,12 @@ RUN bash -c "source $HOME/.nvm/nvm.sh && npm install -g @openai/codex"
 # Add Node.js PATH to .bashrc
 RUN echo 'export PATH="$HOME/.nvm/versions/node/$(node --version)/bin:$PATH"' >> /home/ubuntu/.bashrc
 
+# ローカルに存在しないコマンドを、Node.jsからDocker Socket Proxyへ転送する。
+COPY ./docker-command-proxy.cjs /usr/local/lib/aicontainer/
+COPY ./command-not-found.bash /etc/aicontainer/command-not-found.bash
+ENV BASH_ENV=/etc/aicontainer/command-not-found.bash
+RUN echo 'source /etc/aicontainer/command-not-found.bash' >> /home/ubuntu/.bashrc
+
 # Copy and set up firewall script
 COPY ./init-firewall.sh /usr/local/bin/
 USER root
