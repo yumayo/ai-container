@@ -156,7 +156,7 @@ docker run ubuntu echo hello  # 403 Forbidden
 docker rm mycontainer         # 403 Forbidden
 ```
 
-**コマンドレベル**: `docker-proxy-allow` で指定したコマンドのみ `docker exec` で実行できます。未指定の場合、全てのコマンドが拒否されます。コマンド名に続けて引数も指定でき、前方一致で判定します。
+**コマンドレベル**: `docker-proxy-allow` で指定したコマンドのみ `docker exec` で実行できます。未指定の場合、全てのコマンドが拒否されます。コマンド名に続けて引数も指定でき、コマンド列の先頭から照合します。一致した後の追加引数は許可します。
 
 ```sh
 # docker-proxy-allow=npx playwright,node の場合
@@ -166,6 +166,22 @@ docker compose exec myapp node script.js       # OK（node に一致）
 docker compose exec myapp cat .env             # 403 Forbidden
 docker compose exec myapp /usr/bin/npx playwright test  # OK（フルパスでも判定可能）
 ```
+
+コマンド名と引数には `*` を指定できます。`*` は0文字以上の任意の文字に一致し、引数の境界は越えません。`?` や `[]` はワイルドカードとして扱いません。
+
+```ini
+docker-proxy-allow=python*,npx playwright*
+# python / python3 / python3.12、npx playwright / npx playwright@latest などを許可
+```
+
+```ini
+docker-proxy-allow=*
+# docker-proxy-containers に登録したコンテナで、全コマンドを許可
+```
+
+`python` だけなら引数の有無を問わず許可します。`python *` は少なくとも1つの引数が必要です。`*` を指定した場合も、コンテナの許可リストとAPI制限は適用されます。
+
+Goプロキシのテストは `cd docker/docker-proxy && go test main.go main_test.go` で実行できます。プロキシイメージのビルド時にも自動で実行します。
 
 ## セキュリティ
 

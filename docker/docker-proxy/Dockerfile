@@ -1,7 +1,8 @@
 FROM golang:1.26-alpine AS builder
 WORKDIR /build
-COPY main.go .
+COPY *.go .
 RUN go mod init docker-proxy && \
+    CGO_ENABLED=0 go test ./... && \
     CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o docker-proxy .
 
 FROM alpine:3.23

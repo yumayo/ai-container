@@ -53,6 +53,9 @@ func loadAllowList(filePath string) []allowRule {
 }
 
 func matchRule(rule allowRule, cmd []string) bool {
+	if len(rule) == 0 || len(cmd) == 0 || cmd[0] == "" {
+		return false
+	}
 	for i, expected := range rule {
 		if i >= len(cmd) {
 			return false
@@ -61,11 +64,32 @@ func matchRule(rule allowRule, cmd []string) bool {
 		if i == 0 {
 			actual = path.Base(actual)
 		}
-		if expected != actual {
+		if !matchToken(expected, actual) {
 			return false
 		}
 	}
 	return true
+}
+
+// matchToken treats only '*' as a wildcard, matching zero or more characters.
+// Tokens are matched separately so wildcards cannot cross argument boundaries.
+func matchToken(pattern, actual string) bool {
+	parts := strings.Split(pattern, "*")
+	if len(parts) == 1 {
+		return pattern == actual
+	}
+	if !strings.HasPrefix(actual, parts[0]) {
+		return false
+	}
+	actual = actual[len(parts[0]):]
+	for _, part := range parts[1 : len(parts)-1] {
+		index := strings.Index(actual, part)
+		if index < 0 {
+			return false
+		}
+		actual = actual[index+len(part):]
+	}
+	return strings.HasSuffix(actual, parts[len(parts)-1])
 }
 
 func loadContainerList(filePath string) []string {
