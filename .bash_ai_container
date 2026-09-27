@@ -187,37 +187,6 @@ __aicontainer_parse_config() {
   done < "$config_file"
 }
 
-__aicontainer_scan_aibin() {
-  local aibin_dir="$1"
-  local started_at
-
-  if [ ! -d "$aibin_dir" ]; then
-    return
-  fi
-
-  started_at="$(__aicontainer_now_ms)"
-  __aicontainer_log_step "aibin scan start: $aibin_dir"
-
-  local file
-  for file in "$aibin_dir"/*; do
-    [ -e "$file" ] || continue
-
-    if [ ! -f "$file" ]; then
-      __aicontainer_log_warning "aibin skipped (not a file): $file"
-      continue
-    fi
-
-    if [ ! -x "$file" ]; then
-      __aicontainer_log_warning "aibin skipped (not executable): $file"
-      continue
-    fi
-
-    __aicontainer_log_info "aibin command available: $(basename "$file")"
-  done
-
-  __aicontainer_log_success "aibin scan done:  $aibin_dir ($( __aicontainer_format_elapsed "$started_at"))"
-}
-
 # Dockerネットワークが存在しない場合は作成する
 __aicontainer_ensure_network() {
   local net_name="$1"
@@ -583,11 +552,8 @@ aicontainer() {
   local session_mounts=""
   local init_cmd=""
 
-  # .aibin と .aicontainer の path 設定をPATHに追加
+  # .aicontainer の path 設定をPATHに追加
   local extra_paths=""
-  if [ -d "$workdir/.aibin" ]; then
-    extra_paths="$workdir/.aibin:"
-  fi
 
   if [ ${#AICONTAINER_PATHS[@]} -gt 0 ]; then
     for p in "${AICONTAINER_PATHS[@]}"; do
@@ -603,8 +569,6 @@ aicontainer() {
     # .bashrcに書き込み（後続のシェルでもPATHが有効）+ 現在のシェルにもexport
     init_cmd="echo 'export PATH=${extra_paths}\\\$PATH' >> ~/.bashrc && export PATH=${extra_paths}\\\$PATH && "
   fi
-
-  __aicontainer_scan_aibin "$workdir/.aibin"
 
   if [ -n "$config_session" ]; then
     # セッションモード: ホストの指定パスをバインドマウント
