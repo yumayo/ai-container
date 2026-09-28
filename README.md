@@ -55,7 +55,7 @@ node_modules
 ### `.aicontainer` — コンテナ動作設定
 
 ```
-network=myproject                      # Dockerネットワーク名（yumayo-ai-myproject）
+network=myproject                      # Dockerネットワーク名（指定値をそのまま使用、未指定時は yumayo-ai）
 session=../                            # セッション共有パス（複数プロジェクトで共有可能）
 image=yumayo-ai-custom                 # 使用するDockerイメージ（デフォルト: yumayo-ai）
 tool=claude                            # 既定ツール（claude / codex / claude-ollama）
@@ -68,6 +68,8 @@ docker-proxy-allow=node
 docker-proxy-containers=myapp         # execを許可するコンテナ名（複数行指定可、記載順で転送）
 docker-proxy-containers=mydb
 ```
+
+名前の変更前に作成されたネットワーク（例: `yumayo-ai-myproject`）は自動では改名・削除されません。不要になった場合は、利用中のコンテナがないことを確認してから削除してください。
 
 `docker-proxy-allow` と `docker-proxy-containers` は同じキーを複数行書いて指定します。未指定時はそれぞれ全コマンド・全コンテナを拒否します。従来のカンマ区切りの設定は、1項目につき1行へ書き換えてください。空の定義は無視します。
 

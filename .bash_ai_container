@@ -491,11 +491,7 @@ aicontainer() {
 
   # 引数チェック
   local cmd="claude --dangerously-skip-permissions --disallowedTools WebSearch,WebFetch"
-  # プレフィックス付与: .aicontainer 指定時は yumayo-ai-<name>、未指定時は yumayo-ai
-  local network="yumayo-ai"
-  if [ -n "$config_network" ]; then
-    network="yumayo-ai-$config_network"
-  fi
+  local network="${config_network:-yumayo-ai}"
   # 1Mコンテキストが使用できないことがあるらしいのでOFFにしてます。
   # https://github.com/anthropics/claude-code/issues/34143#issuecomment-4058474125
   # extra_env="-e DISABLE_TELEMETRY=1 -e CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"
@@ -520,9 +516,10 @@ aicontainer() {
     cmd="claude --dangerously-skip-permissions --disallowedTools WebSearch,WebFetch --model $AI_TOOL_MODEL"
     extra_env="-e ANTHROPIC_AUTH_TOKEN=ollama -e ANTHROPIC_BASE_URL=http://ollama:11434"
     # https://github.com/yumayo/nginx-open-webui-ollama
-    # ネットワークを切り替えています。
-    # 完全ローカルで動作させるため、ollamaコンテナで動作させます。
-    network="nginx-open-webui-ollama_internal_net"
+    # network未指定時は、ollamaコンテナのネットワークを使用します。
+    if [ -z "$config_network" ]; then
+      network="nginx-open-webui-ollama_internal_net"
+    fi
     extra_opts="--entrypoint bash"
     shell_prefix=""
   elif [ "$AI_TOOL" = "codex" ]; then

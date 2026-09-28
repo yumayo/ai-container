@@ -70,7 +70,7 @@ sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
         self.assertEqual(record["names"], ["postgres", "web_api", "service.local"])
         self.assertEqual(record["names_after_edit"], record["names"])
         self.assertTrue(record["readonly"])
-        self.assertIn("yumayo-ai-project", record["args"])
+        self.assertEqual(record["args"][record["args"].index("--network") + 1], "project")
         self.assertIn("FIREWALL_MODE=codex", record["args"])
         self.assertFalse(Path(record["snapshot"]).exists())
 
@@ -101,7 +101,16 @@ sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
     def test_no_dns_setting_needs_no_snapshot(self):
         result = self.run_launcher()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertNotIn("snapshot", json.loads(self.calls.read_text()))
+        record = json.loads(self.calls.read_text())
+        self.assertNotIn("snapshot", record)
+        self.assertEqual(record["args"][record["args"].index("--network") + 1], "yumayo-ai")
+
+    def test_ollama_uses_configured_network(self):
+        self.config.write_text("network=project\n")
+        result = self.run_launcher("ollama", "model")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        args = json.loads(self.calls.read_text())["args"]
+        self.assertEqual(args[args.index("--network") + 1], "project")
 
     def test_proxy_container_order_is_passed_to_the_ai_container(self):
         self.config.write_text("docker-proxy-name=project\ndocker-proxy-allow=pytest\n"
@@ -115,6 +124,7 @@ sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
         args = json.loads(self.calls.read_text())["args"]
         self.assertIn("DOCKER_HOST=unix:///var/run/docker-proxy/docker.sock", args)
         self.assertIn("DOCKER_PROXY_CONTAINERS=tools\napp", args)
+        self.assertIn("yumayo-ai-proxy-project-sock:/var/run/docker-proxy", args)
 
     def test_repeated_proxy_definitions_reach_both_containers_without_shell_expansion(self):
         self.config.write_text("docker-proxy-name=project\r\n"
@@ -129,10 +139,13 @@ sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
         result = self.run_launcher()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         proxy_args = json.loads((self.root / "proxy-calls.json").read_text())["args"]
+        self.assertEqual(proxy_args[proxy_args.index("--name") + 1], "yumayo-ai-proxy-project")
+        self.assertIn("yumayo-ai-proxy-project-sock:/var/run/docker-proxy", proxy_args)
         self.assertIn("DOCKER_PROXY_ALLOW=python*\nnpx playwright*\ntool --items=a,b\n"
                       "tool $(touch injected) `touch injected`", proxy_args)
         self.assertIn("DOCKER_PROXY_CONTAINERS=tools\napp", proxy_args)
         ai_args = json.loads(self.calls.read_text())["args"]
+        self.assertIn("yumayo-ai-proxy-project-sock:/var/run/docker-proxy", ai_args)
         self.assertIn("DOCKER_PROXY_CONTAINERS=tools\napp", ai_args)
         self.assertFalse((self.root / "injected").exists())
 
