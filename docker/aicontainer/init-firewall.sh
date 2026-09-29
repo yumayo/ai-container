@@ -42,7 +42,7 @@ MODE="${1:-claude}"
 
 case "$MODE" in
     claude)
-        ALLOWED_DOMAINS=("api.anthropic.com")
+        ALLOWED_DOMAINS=("api.anthropic.com" "platform.claude.com")
         ;;
     codex)
         # ChatGPTサブスク利用時: chatgpt.com + 認証系
