@@ -55,7 +55,7 @@ case "$MODE" in
         ;;
 esac
 
-# .aicontainerのdns設定は、ホスト側で作成した読み取り専用ファイルから取得する。
+# .aicontainerのallow-dns設定は、ホスト側で作成した読み取り専用ファイルから取得する。
 # 引数や環境変数からは追加せず、sudoで再実行しても許可先を増やせないようにする。
 if [ -f /etc/aicontainer/dns ]; then
     while IFS= read -r domain || [ -n "$domain" ]; do
@@ -164,7 +164,7 @@ for domain in "${ALLOWED_DOMAINS[@]}"; do
     done <<< "${DOMAIN_IPS[$domain]}"
 done
 
-# API・認証先とdns設定の名前から解決したIPへの通信を全ポートで許可する。
+# API・認証先とallow-dns設定の名前から解決したIPへの通信を全ポートで許可する。
 # ただし、上で設定したDNSの拒否を優先する。
 # 応答の送信元IPも制限し、既存の接続が許可リストを迂回するのを防ぐ。
 iptables -A INPUT -m set --match-set allowed-domains src -m state --state ESTABLISHED -j ACCEPT
@@ -177,7 +177,7 @@ ip6tables -A OUTPUT -j REJECT --reject-with icmp6-adm-prohibited
 log_success "Firewall configuration complete"
 log_step "Verifying firewall rules..."
 
-# 追加のdns設定と重複しないIPを選び、通信の拒否を確認する。
+# 追加のallow-dns設定と重複しないIPを選び、通信の拒否を確認する。
 BLOCKED_IP=""
 while read -r ip; do
     if ! ipset test allowed-domains "$ip" >/dev/null 2>&1; then

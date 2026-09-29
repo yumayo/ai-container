@@ -170,15 +170,18 @@ __aicontainer_parse_config() {
       elif [ "$key" = "env" ]; then
         AICONTAINER_ENVS+=("$value")
         __aicontainer_log_info "config: $key=$value"
-      elif [ "$key" = "dns" ]; then
+      elif [ "$key" = "allow-dns" ]; then
         # Dockerのコンテナ名・エイリアス・ドメイン名を1行に1つ指定する。
         value="${value%"${value##*[![:space:]]}"}"
         if [[ ! "$value" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$ ]] || [ ${#value} -gt 253 ]; then
-          __aicontainer_log_error "invalid dns name: $value"
+          __aicontainer_log_error "allow-dns に指定された名前が無効です: $value"
           return 1
         fi
-        AICONTAINER_DNS+=("$value")
+        AICONTAINER_ALLOW_DNS+=("$value")
         __aicontainer_log_info "config: $key=$value"
+      elif [ "$key" = "dns" ]; then
+        __aicontainer_log_error "dns は allow-dns に変更されました。設定ファイル .aicontainer を更新してください。"
+        return 1
       elif [ "$key" = "docker-proxy-allow" ] || [ "$key" = "docker-proxy-containers" ]; then
         value="${value#"${value%%[![:space:]]*}"}"
         value="${value%"${value##*[![:space:]]}"}"
@@ -266,7 +269,7 @@ aicontainer() {
   declare -A AICONTAINER_CONFIG
   AICONTAINER_PATHS=()
   AICONTAINER_ENVS=()
-  local -a AICONTAINER_DNS=()
+  local -a AICONTAINER_ALLOW_DNS=()
   local -a AICONTAINER_PROXY_ALLOW=()
   local -a AICONTAINER_PROXY_CONTAINERS=()
   __aicontainer_parse_config || return 1
@@ -590,8 +593,8 @@ aicontainer() {
     extra_env="$extra_env -e $proxy_containers_env"
   fi
 
-  # 起動時のDNS設定を読み取り専用で渡し、コンテナ内からの許可先追加を防ぐ。
-  if [ ${#AICONTAINER_DNS[@]} -gt 0 ]; then
+  # 起動時のallow-dns設定を読み取り専用で渡し、コンテナ内からの許可先追加を防ぐ。
+  if [ ${#AICONTAINER_ALLOW_DNS[@]} -gt 0 ]; then
     extra_opts="$extra_opts --mount type=bind,source=\"\$aicontainer_dns_file\",target=/etc/aicontainer/dns,readonly"
   fi
 
@@ -607,16 +610,16 @@ aicontainer() {
     $shell_prefix -ci \"${init_cmd}$cmd\""
 
   local dns_setup=""
-  if [ ${#AICONTAINER_DNS[@]} -gt 0 ]; then
+  if [ ${#AICONTAINER_ALLOW_DNS[@]} -gt 0 ]; then
     local dns_values
-    printf -v dns_values '%q ' "${AICONTAINER_DNS[@]}"
+    printf -v dns_values '%q ' "${AICONTAINER_ALLOW_DNS[@]}"
     dns_setup="aicontainer_dns_file=\"\$aicontainer_runtime_dir/dns\"
       printf '%s\\n' $dns_values > \"\$aicontainer_dns_file\" || exit 1
       chmod 0444 \"\$aicontainer_dns_file\" || exit 1"
   fi
 
   # 未指定時は使い捨ての専用ネットワーク、指定時はMCPなどと共有するネットワークを使う。
-  # 共有ネットワーク上の接続先はdns設定とコンテナ内ファイアウォールで制限する。
+  # 共有ネットワーク上の接続先はallow-dns設定とコンテナ内ファイアウォールで制限する。
   # dumpにも同じ準備・後始末を含める。共有ネットワークは削除しない。
   local network_value='"yumayo-ai-${aicontainer_runtime_dir##*.}"'
   local network_setup="docker network create --driver bridge --opt com.docker.network.bridge.enable_icc=false \"\$aicontainer_network\" >/dev/null || exit 1

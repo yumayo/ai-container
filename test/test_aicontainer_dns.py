@@ -74,7 +74,7 @@ for option in args:
         record["readonly"] = "readonly" in option.split(",")
         # 元の設定を書き換えても、起動時のコピーは変わらないことを確認する。
         if os.environ.get("DNS_CONFIG_TEST_MUTATE"):
-            (root / ".aicontainer").write_text("dns=unexpected.example\\n")
+            (root / ".aicontainer").write_text("allow-dns=unexpected.example\\n")
             record["names_after_edit"] = snapshot.read_text().splitlines()
 (root / "docker-calls.json").write_text(json.dumps(record))
 sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
@@ -119,8 +119,8 @@ sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
         else:
             self.assertEqual(creates, [])
 
-    def test_repeated_dns_settings_are_passed_in_a_readonly_snapshot(self):
-        self.config.write_text("network=project\ndns=postgres\ndns='web_api'\ndns=service.local   \n")
+    def test_repeated_allow_dns_settings_are_passed_in_a_readonly_snapshot(self):
+        self.config.write_text("network=project\nallow-dns=postgres\nallow-dns='web_api'\nallow-dns=service.local   \n")
         self.env["DNS_CONFIG_TEST_MUTATE"] = "1"
         self.env["TEST_EXISTING_NETWORK"] = "project"
         result = self.run_launcher("codex")
@@ -136,7 +136,7 @@ sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
         self.assert_shared_network_usage("project")
 
     def test_dump_produces_an_executable_command_without_creating_a_snapshot(self):
-        self.config.write_text("dns=postgres\ndns=redis\n")
+        self.config.write_text("allow-dns=postgres\nallow-dns=redis\n")
         result = self.run_launcher("dump")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(self.calls.exists())
@@ -155,7 +155,7 @@ sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
         self.assert_dedicated_network_lifecycle(network)
 
     def test_snapshot_is_removed_if_docker_fails(self):
-        self.config.write_text("dns=postgres\n")
+        self.config.write_text("allow-dns=postgres\n")
         self.env["DNS_CONFIG_TEST_EXIT"] = "7"
         result = self.run_launcher()
         self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
@@ -165,7 +165,7 @@ sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
         network = record["args"][record["args"].index("--network") + 1]
         self.assert_dedicated_network_lifecycle(network)
 
-    def test_no_dns_setting_needs_no_snapshot(self):
+    def test_no_allow_dns_setting_needs_no_snapshot(self):
         result = self.run_launcher()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         record = json.loads(self.calls.read_text())
@@ -183,7 +183,7 @@ sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
         self.assert_shared_network_usage("project", created=True)
 
     def test_existing_mcp_network_is_joined_and_preserved_while_proxy_has_no_network(self):
-        self.config.write_text("network=project\ndns=mcp-server\ndocker-proxy-name=project\n")
+        self.config.write_text("network=project\nallow-dns=mcp-server\ndocker-proxy-name=project\n")
         self.env["TEST_EXISTING_NETWORK"] = "project"
         result = self.run_launcher()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -197,7 +197,7 @@ sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
         self.assertEqual(proxy_args[proxy_args.index("--network") + 1], "none")
 
     def test_shared_network_is_preserved_if_ai_container_fails(self):
-        self.config.write_text("network=project\ndns=mcp-server\n")
+        self.config.write_text("network=project\nallow-dns=mcp-server\n")
         self.env.update(TEST_EXISTING_NETWORK="project", DNS_CONFIG_TEST_EXIT="7")
         result = self.run_launcher("codex")
         self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
@@ -247,7 +247,7 @@ sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
         self.assertNotEqual(*networks)
 
     def test_dump_creates_a_shared_network_once_and_reuses_it(self):
-        self.config.write_text("network=project\ndns=mcp-server\n")
+        self.config.write_text("network=project\nallow-dns=mcp-server\n")
         result = self.run_launcher("dump", "codex")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse((self.root / "docker-events.jsonl").exists())
@@ -363,7 +363,7 @@ sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
         for name in ("", "postgres:5432", "postgres redis", "$(touch injected)",
                      "`touch injected`", "a" * 254):
             with self.subTest(name=name):
-                self.config.write_text(f"dns={name}\n")
+                self.config.write_text(f"allow-dns={name}\n")
                 result = self.run_launcher("dump")
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse((self.root / "injected").exists())
