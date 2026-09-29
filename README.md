@@ -27,11 +27,10 @@ bash install.sh rebuild  # ベースイメージ含め全て再ビルド
 ```sh
 aicontainer              # Claude Code
 aicontainer codex        # Codex CLI
-aicontainer ollama MODEL # Claude Code + Ollama
 aicontainer bash         # .aicontainer の tool を維持して bash を起動
 ```
 
-認証情報・チャット履歴はモードごとに `.claude.local` / `.codex.local` / `.claude.ollama` へ分離保存されます。
+認証情報・チャット履歴はモードごとに `.claude.local` / `.codex.local` へ分離保存されます。
 
 Codex CLI は WebSearch を無効化した状態（`web_search=disabled`）で起動します。
 
@@ -55,10 +54,11 @@ node_modules
 ### `.aicontainer` — コンテナ動作設定
 
 ```
-network=myproject                      # Dockerネットワーク名（指定値をそのまま使用、未指定時は yumayo-ai）
+network=myproject                      # 参加するDockerネットワーク名（未指定時は専用ネットワーク）
+dns=mcp-server                         # 追加で通信を許可するコンテナ名・ドメイン名（複数行指定可）
 session=../                            # セッション共有パス（複数プロジェクトで共有可能）
 image=yumayo-ai-custom                 # 使用するDockerイメージ（デフォルト: yumayo-ai）
-tool=claude                            # 既定ツール（claude / codex / claude-ollama）
+tool=claude                            # 既定ツール（claude / codex）
 path=./bin                             # コンテナ内PATHに追加（複数行指定可）
 env=CLAUDE_CODE_EFFORT_LEVEL=max       # コンテナに環境変数を追加（複数行指定可）
 before-start-up=./setup.sh             # コンテナ起動前にホスト側で実行するコマンド
@@ -69,21 +69,36 @@ docker-proxy-containers=myapp         # execを許可するコンテナ名（複
 docker-proxy-containers=mydb
 ```
 
-名前の変更前に作成されたネットワーク（例: `yumayo-ai-myproject`）は自動では改名・削除されません。不要になった場合は、利用中のコンテナがないことを確認してから削除してください。
+`network` 未指定時は、起動ごとに `yumayo-ai-<ランダム値>` という専用のbridgeネットワークを作成します。専用ネットワークではコンテナ間通信を無効化し、AIコンテナ終了時にネットワークも削除します。
+
+`network` を指定した場合は、その名前のDockerネットワークに参加します。存在しなければbridgeネットワークを作成し、終了後も残します。MCPサーバーなどとネットワークを共有する場合に使用してください。共有ネットワークでも、通信先はAPI・認証先と `dns` に指定した名前から解決したIPだけに制限します。
+
+`aicontainer dump` の出力にも同じネットワーク準備・後始末を含みます。Ollamaモード（`aicontainer ollama` / `tool=claude-ollama`）は廃止済みで、指定すると起動前にエラーになります。
 
 `docker-proxy-allow` と `docker-proxy-containers` は同じキーを複数行書いて指定します。未指定時はそれぞれ全コマンド・全コンテナを拒否します。従来のカンマ区切りの設定は、1項目につき1行へ書き換えてください。空の定義は無視します。
 
-`dns` には、追加で接続を許可するコンテナ名・ネットワークエイリアス・ドメイン名を1行に1つ指定できます。
+`dns` には、追加で接続を許可するコンテナ名・ネットワークエイリアス・外部ドメイン名を1行に1つ指定できます。コンテナ名やエイリアスを使う場合は、`network` に同じDockerネットワークを指定してください。
 
 ```
+dns=api.example.org
+```
+
+コンテナ起動時に、参加したネットワークのDNSを使ってIPv4アドレスを解決し、`/etc/hosts` とIP許可リストに登録します。接続先のコンテナは先に起動してください。名前解決に失敗した場合はAIコンテナの起動を中止します。モード別のAnthropic／OpenAIのAPI・認証先は自動で登録されます。
+
+API・認証先と `dns` に指定した接続先以外のIPは許可しません。設定や接続先のIPを更新した場合はAIコンテナを再作成してください。
+
+### ローカルのMCPサーバーに接続する
+
+HTTPで接続するMCPサーバーが `myproject` ネットワーク上で `mcp-server` という名前で動作する場合、`.aicontainer` に次を指定します。
+
+```ini
 network=myproject
-dns=postgres
-dns=redis
+dns=mcp-server
 ```
 
-コンテナ起動時に、指定したDockerネットワークのDNSを使ってIPv4アドレスを解決し、`/etc/hosts` とIP許可リストに登録します。接続先のコンテナは先に起動してください。名前解決に失敗した場合はAIコンテナの起動を中止します。モード別のAnthropic／OpenAIのAPI・認証先は自動で登録されます。
+AIツール側のMCP接続URLは、サーバーの設定に合わせて、例えば `http://mcp-server:3000/mcp` とします。MCPサーバーはコンテナ内で `0.0.0.0` に待ち受けさせてください。同じネットワーク経由で接続するため、ホストへのポート公開は不要です。`dns` は接続許可の設定であり、AIツールへのMCP登録は別途必要です。
 
-同じDockerネットワークでも、`dns` に指定していない接続先のIPは許可しません。設定や接続先のIPを更新した場合はAIコンテナを再作成してください。
+ネットワークはコンテナ間通信と外部APIへの通信が可能なものを使用してください。`network` の指定だけではMCPへの通信は許可されず、`dns` に指定したサーバーのIPへの通信を許可します。許可はIP単位で、DNSを除く全ポートが対象です。
 
 ### `.aimount` — 追加マウント
 
@@ -106,6 +121,8 @@ AI Container ──(Unix Socket)──> Go Proxy ──(Docker Socket)──> Do
   DOCKER_HOST=/var/run/            exec以外を                  /var/run/
   docker-proxy/docker.sock         403で拒否                   docker.sock
 ```
+
+AIコンテナとプロキシは、共有volumeにマウントしたUnixソケットで通信します。同じDockerネットワークに所属する必要はありません。プロキシは `--network none` で起動し、ホストのDocker EngineにもUnixソケットで接続します。旧構成で起動中のプロキシは、次回の `aicontainer` 起動時にネットワークなしの構成へ作り直します。実行先の外部コンテナは、それぞれのプロジェクトネットワークに置いたまま利用できます。
 
 ### 手順
 
@@ -193,6 +210,8 @@ docker-proxy-allow=*
 Goプロキシのテストは `cd docker/docker-proxy && go test main.go main_test.go` で実行できます。プロキシイメージのビルド時にも自動で実行します。
 
 ## セキュリティ
+
+AIコンテナは既定で専用ネットワークを使い、`network` を指定した場合だけ他コンテナとネットワークを共有します。接続先はどちらの場合もコンテナ内のファイアウォールで制限します。外部コンテナのコマンド実行はDocker Socket Proxyを経由し、HTTPのMCPサーバーには `dns` で許可して直接接続します。
 
 接続先は、モード別のAnthropic／OpenAIのAPI・認証先と、`.aicontainer` の `dns` に指定した名前から解決したIPv4アドレスに限定しています。登録済みIPへの送信とその応答は、DNS（UDP/TCP 53番）を除き全ポートで許可します。localhost、自分自身のIP、未登録のIP、IPv6通信は拒否します。
 
