@@ -1,6 +1,6 @@
 'use strict';
 
-// DockerなしでUnix socket、HTTP upgrade、Bashのフォールバックを検証する。
+// Dockerなしでdpの明示実行、Unix socket、HTTP upgradeを検証する。
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
@@ -10,8 +10,7 @@ const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 const { once } = require('node:events');
 
-const client = path.resolve(__dirname, '../docker/aicontainer/docker-command-proxy.cjs');
-const hook = path.resolve(__dirname, '../docker/aicontainer/command-not-found.bash');
+const client = path.resolve(__dirname, '../docker/aicontainer/dp');
 const missing = 'aicontainer-missing-command-for-test';
 
 function frame(channel, text) {
@@ -23,7 +22,7 @@ function frame(channel, text) {
 }
 
 async function fixture(t, options = {}) {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'command-proxy-'));
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dp-'));
   const socketPath = path.join(dir, 'docker.sock');
   const calls = [];
   const sockets = new Set();
@@ -99,12 +98,13 @@ async function fixture(t, options = {}) {
   });
   const run = async (args = [missing], config = {}) => {
     const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
-    const binary = config.tty ? 'script' : (config.bash ? 'bash' : process.execPath);
-    const command = config.tty ? ['-q', '-e', '-c', [process.execPath, client, ...args].map(quote).join(' '), '/dev/null']
-      : (config.bash ? ['--noprofile', '--norc', '-c', config.bash] : [client, ...args]);
+    const binary = config.tty ? 'script' : (config.bash ? 'bash' : client);
+    const command = config.tty ? ['-q', '-e', '-c', [client, ...args].map(quote).join(' '), '/dev/null']
+      : (config.bash ? ['--noprofile', '--norc', '-c', config.bash] : args);
     const child = spawn(binary, command, {
         cwd: dir,
-        env: { ...process.env, BASH_ENV: hook, DOCKER_HOST: `unix://${socketPath}`,
+        env: { ...process.env, BASH_ENV: '', PATH: `${dir}:${path.dirname(client)}:${process.env.PATH}`,
+          DOCKER_HOST: `unix://${socketPath}`,
           DOCKER_PROXY_CONTAINERS: containers.join('\n'), ...config.env },
         stdio: ['pipe', 'pipe', 'pipe'],
       });
@@ -120,7 +120,7 @@ async function fixture(t, options = {}) {
   return { run, calls, dir };
 }
 
-test('missing command tries configured containers and preserves argv, cwd, streams and exit code', async (t) => {
+test('dp tries configured containers and preserves argv, cwd, streams and exit code', async (t) => {
   const { run, calls, dir } = await fixture(t, { containers: ['first', 'second', 'third'], absent: ['second', 'third'], exitCode: 7 });
   const args = [missing, 'argument with spaces', '', '$(touch injected)', '"quoted"'];
   const result = await run(args, { env: { DOCKER_PROXY_CONTAINERS: ' second \r third \r\n\n first ' } });
@@ -188,13 +188,15 @@ test('all absent executables return 127', async (t) => {
   assert.match(result.stderr, /command not found/);
 });
 
-test('an empty allowed container list returns 127 without creating an exec', async (t) => {
+test('an empty allowed container list reports the required setting without creating an exec', async (t) => {
   const { run, calls } = await fixture(t);
-  assert.equal((await run([missing], { env: { DOCKER_PROXY_CONTAINERS: '' } })).code, 127);
+  const result = await run([missing], { env: { DOCKER_PROXY_CONTAINERS: '' } });
+  assert.equal(result.code, 125);
+  assert.match(result.stderr, /docker-proxy-containers/);
   assert.equal(calls.length, 1);
 });
 
-test('unregistered visible containers are never tried by automatic command forwarding', async (t) => {
+test('unregistered visible containers are never tried by dp', async (t) => {
   const { run, calls } = await fixture(t, { containers: ['unregistered', 'registered'], absent: ['registered'] });
   const result = await run([missing], { env: { DOCKER_PROXY_CONTAINERS: 'registered\nstopped' } });
   assert.equal(result.code, 127);
@@ -208,26 +210,61 @@ test('disconnected proxy returns an actionable error', async (t) => {
   assert.match(result.stderr, /ENOENT/);
 });
 
-test('Bash keeps local commands local and does not proxy explicit paths or a disabled proxy', async (t) => {
+test('Bash does not forward commands without dp', async (t) => {
   const { run, calls } = await fixture(t);
   const local = await run([], { bash: 'printf local' });
   assert.deepEqual(local, { code: 0, stdout: 'local', stderr: '' });
-  const disabled = await run([], { bash: missing, env: { DOCKER_HOST: '' } });
-  assert.equal(disabled.code, 127);
-  const explicit = await run([`./${missing}`]);
-  assert.equal(explicit.code, 127);
+  const absent = await run([], { bash: missing });
+  assert.equal(absent.code, 127);
   assert.equal(calls.length, 0);
 });
 
-test('Bash forwards missing commands from a noninteractive shell', async (t) => {
-  // hook内のインストールパスだけを一時コピーで置き換える。
+test('dp npx playwright --version runs remotely even when npx exists locally', async (t) => {
   const { run, dir, calls } = await fixture(t, { exitCode: 9 });
-  const localHook = path.join(dir, 'hook.bash');
-  await fs.writeFile(localHook, (await fs.readFile(hook, 'utf8'))
-    .replace('/usr/local/lib/aicontainer/docker-command-proxy.cjs', JSON.stringify(client)));
-  const result = await run([], { bash: `${missing} 'two words' ''`, env: { BASH_ENV: localHook } });
+  await fs.writeFile(path.join(dir, 'npx'), '#!/bin/sh\nprintf local-npx', { mode: 0o755 });
+  assert.equal((await run([], { bash: 'npx playwright --version' })).stdout, 'local-npx');
+  assert.equal(calls.length, 0);
+  const result = await run([], { bash: 'dp npx playwright --version' });
   assert.deepEqual(result, { code: 9, stdout: 'stdout\n', stderr: 'stderr\n' });
-  assert.deepEqual(calls.find((c) => c.path.endsWith('/exec')).body.Cmd, [missing, 'two words', '']);
+  assert.deepEqual(calls.find((c) => c.path.endsWith('/exec')).body.Cmd, ['npx', 'playwright', '--version']);
+});
+
+test('dp forwards explicit executable paths without consulting the local filesystem', async (t) => {
+  const { run, calls } = await fixture(t);
+  for (const command of ['/opt/tools/npx', './node_modules/.bin/playwright']) {
+    assert.equal((await run([command, '--version'])).code, 0);
+    assert.deepEqual(calls.filter((c) => c.path.endsWith('/exec')).at(-1).body.Cmd, [command, '--version']);
+  }
+});
+
+test('a disabled or non-Unix proxy reports configuration guidance without executing locally', async (t) => {
+  const { run, calls } = await fixture(t);
+  for (const host of ['', 'tcp://localhost:2375']) {
+    const result = await run(['node', '--version'], { env: { DOCKER_HOST: host } });
+    assert.equal(result.code, 125);
+    assert.match(result.stderr, /dp:.*docker-proxy-name/);
+    assert.equal(result.stdout, '');
+  }
+  assert.equal(calls.length, 0);
+});
+
+test('stopped registered containers are reported without creating an exec', async (t) => {
+  const { run, calls } = await fixture(t);
+  const result = await run([missing], { env: { DOCKER_PROXY_CONTAINERS: 'stopped' } });
+  assert.equal(result.code, 127);
+  assert.match(result.stderr, /No registered containers are running/);
+  assert.equal(calls.length, 1);
+});
+
+test('usage and help work without a proxy', async (t) => {
+  const { run, calls } = await fixture(t);
+  const usage = await run([], { env: { DOCKER_HOST: '' } });
+  assert.equal(usage.code, 2);
+  assert.match(usage.stderr, /Usage: dp COMMAND/);
+  const help = await run(['--help'], { env: { DOCKER_HOST: '' } });
+  assert.equal(help.code, 0);
+  assert.match(help.stdout, /dp npx playwright --version/);
+  assert.equal(calls.length, 0);
 });
 
 test('truncated output is an error and never executes on a second container', async (t) => {

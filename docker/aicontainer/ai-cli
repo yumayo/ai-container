@@ -1,0 +1,26 @@
+#!/bin/bash
+set -euo pipefail
+
+# セッション用ホームやワークスペースとは独立した、コンテナ共通の指示。
+prompt_file=/etc/aicontainer/system-prompt.md
+tool="${0##*/}"
+
+if [[ ! -r "$prompt_file" ]]; then
+    printf 'aicontainer: cannot read system prompt: %s\n' "$prompt_file" >&2
+    exit 1
+fi
+
+case "$tool" in
+    claude)
+        exec /usr/local/lib/aicontainer/bin/claude --append-system-prompt-file "$prompt_file" "$@"
+        ;;
+    codex)
+        # JSON文字列はTOMLの基本文字列としても有効。改行・引用符を含む本文を1引数で渡す。
+        instructions=$(node -e 'process.stdout.write(JSON.stringify(require("node:fs").readFileSync(process.argv[1], "utf8")))' "$prompt_file")
+        exec /usr/local/lib/aicontainer/bin/codex -c "developer_instructions=$instructions" "$@"
+        ;;
+    *)
+        printf 'aicontainer: unsupported AI tool: %s\n' "$tool" >&2
+        exit 2
+        ;;
+esac

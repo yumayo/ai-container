@@ -9,11 +9,24 @@ RUN bash -c "source $HOME/.nvm/nvm.sh && npm install -g @openai/codex"
 # Add Node.js PATH to .bashrc
 RUN echo 'export PATH="$HOME/.nvm/versions/node/$(node --version)/bin:$PATH"' >> /home/ubuntu/.bashrc
 
-# ローカルに存在しないコマンドを、Node.jsからDocker Socket Proxyへ転送する。
-COPY ./docker-command-proxy.cjs /usr/local/lib/aicontainer/
-COPY ./command-not-found.bash /etc/aicontainer/command-not-found.bash
-ENV BASH_ENV=/etc/aicontainer/command-not-found.bash
-RUN echo 'source /etc/aicontainer/command-not-found.bash' >> /home/ubuntu/.bashrc
+# dpで明示的にDocker Socket Proxy経由のコマンド実行を行う。
+COPY --chmod=0755 ./dp /usr/local/bin/dp
+
+# 共通指示を各CLIのシステム／開発者指示として渡す。セッションの設定は書き換えない。
+COPY --chmod=0644 ./system-prompt.md /etc/aicontainer/system-prompt.md
+COPY --chmod=0755 ./ai-cli /usr/local/lib/aicontainer/ai-cli
+USER root
+RUN mkdir -p /usr/local/lib/aicontainer/bin /opt/aicontainer/bin && \
+    ln -s /home/ubuntu/.local/bin/claude /usr/local/lib/aicontainer/bin/claude && \
+    bash -c 'export NVM_DIR=/home/ubuntu/.nvm; source "$NVM_DIR/nvm.sh" && \
+      ln -s "$(command -v codex)" /usr/local/lib/aicontainer/bin/codex && \
+      ln -s "$(command -v node)" /usr/local/bin/node' && \
+    ln -s /usr/local/lib/aicontainer/ai-cli /opt/aicontainer/bin/claude && \
+    ln -s /usr/local/lib/aicontainer/ai-cli /opt/aicontainer/bin/codex
+USER ubuntu
+ENV PATH="/opt/aicontainer/bin:${PATH}"
+# nvmや~/.local/binのPATH設定後も、対話Bashでは必ずラッパーを選ぶ。
+RUN echo 'export PATH="/opt/aicontainer/bin:$PATH"' >> /home/ubuntu/.bashrc
 
 # Copy and set up firewall script
 COPY ./init-firewall.sh /usr/local/bin/

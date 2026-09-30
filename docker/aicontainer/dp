@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 
-// Node.js標準ライブラリだけで、制限されたDocker Socket Proxyへ接続する。
+// 明示的に指定されたコマンドを、制限されたDocker Socket Proxy経由で実行する。
 const http = require('node:http');
 const { once } = require('node:events');
 
@@ -160,18 +160,15 @@ function isMissingExecutable(error) {
 
 async function main() {
   const cmd = process.argv.slice(2);
-  if (!cmd.length) {
-    console.error('Usage: docker-command-proxy COMMAND [ARG ...]');
-    return 2;
-  }
-  if (cmd[0].includes('/')) {
-    console.error(`${cmd[0]}: command not found`);
-    return 127;
+  if (!cmd.length || (cmd.length === 1 && cmd[0] === '--help')) {
+    const usage = 'Usage: dp COMMAND [ARG ...]\nExample: dp npx playwright --version';
+    if (cmd.length) console.log(usage);
+    else console.error(usage);
+    return cmd.length ? 0 : 2;
   }
   const host = process.env.DOCKER_HOST || '';
   if (!host.startsWith('unix:///')) {
-    console.error(`${cmd[0]}: command not found`);
-    return 127;
+    throw new Error('Docker proxy is not configured. Set docker-proxy-name in .aicontainer and restart aicontainer (DOCKER_HOST must be unix:///...).');
   }
   const socketPath = host.slice('unix://'.length);
   const containers = await request(socketPath, 'GET', '/containers/json');
@@ -183,6 +180,13 @@ async function main() {
     .replaceAll('\r', '\n')
     .split('\n').map((n) => n.trim()).filter(Boolean);
   const targets = [...new Set(configured)].filter((n) => visible.has(n));
+  if (!configured.length) {
+    throw new Error('No containers are registered. Set docker-proxy-containers in .aicontainer and restart aicontainer.');
+  }
+  if (!targets.length) {
+    console.error('dp: No registered containers are running. Check docker-proxy-containers in .aicontainer and start the target containers.');
+    return 127;
+  }
   const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY && process.stderr.isTTY);
   for (const container of targets) {
     const exec = await request(socketPath, 'POST', `/containers/${encodeURIComponent(container)}/exec`, {
@@ -196,11 +200,11 @@ async function main() {
       if (!isMissingExecutable(error)) throw error;
     }
   }
-  console.error(`${cmd[0]}: command not found in registered running containers`);
+  console.error(`dp: ${cmd[0]}: command not found in registered running containers`);
   return 127;
 }
 
 main().then((code) => { process.exitCode = code; }).catch((error) => {
-  console.error(`docker-command-proxy: ${error.message}`);
+  console.error(`dp: ${error.message}`);
   process.exitCode = error instanceof DockerError && error.status === 403 ? 126 : 125;
 });

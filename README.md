@@ -34,6 +34,19 @@ aicontainer bash         # .aicontainer の tool を維持して bash を起動
 
 Codex CLI は WebSearch を無効化した状態（`web_search=disabled`）で起動します。
 
+## AIコンテナの共通指示
+
+コンテナ共通の指示は [`docker/aicontainer/system-prompt.md`](docker/aicontainer/system-prompt.md) で管理し、イメージ内の `/etc/aicontainer/system-prompt.md` に配置します。外部コンテナのコマンドを `dp` で実行するルールをここに記載しています。
+
+`claude` / `codex` の起動ラッパーが、ワークスペースの `AGENTS.md` / `CLAUDE.md` より前の指示レイヤーとして本文を渡します。
+
+- Claude Code: `--append-system-prompt-file` で既定のシステムプロンプトに追加します。
+- Codex CLI: `-c developer_instructions=...` で開発者指示として渡します。既定のモデル指示は維持します。この起動では、保存済み設定の `developer_instructions` よりコンテナ共通指示が優先されます。
+
+プロジェクトの `AGENTS.md` / `CLAUDE.md` も通常どおり読み込まれます。ワークスペースやセッション用の `.claude.local` / `.codex.local` に共通指示を書き込む必要はありません。`aicontainer bash` 内から `claude` / `codex` を起動する場合もラッパーを経由します。
+
+共通指示を変更するには上記ファイルを編集し、`bash install.sh main` でイメージを再ビルドして新しいセッションを開始してください。独自ファイルを使う場合は、既存の `.aimount` で `/etc/aicontainer/system-prompt.md` にマウントすることもできます。
+
 ## 設定ファイル
 
 プロジェクトルートに配置して動作をカスタマイズできます。いずれも任意で、なくても動作します。
@@ -114,7 +127,9 @@ ${API_KEY?}:/workspace/api-key
 
 ## Docker Socket Proxy（外部コンテナ連携）
 
-AIコンテナのBashで見つからないコマンドは、`docker-proxy-containers` に登録した起動中のコンテナへ自動転送します。転送プログラムはNode.jsの標準ライブラリだけで動作し、Docker CLIは不要です。既存の `docker exec` / `docker compose exec` による呼び出しも利用できます。
+AIコンテナ内で `dp COMMAND [ARG ...]` を実行すると、`docker-proxy-containers` に登録した起動中のコンテナへ Docker Socket Proxy 経由で転送します。ローカルに同名のコマンドが存在しても、`dp npx playwright --version` のように外部コンテナで実行できます。`dp` はNode.jsの標準ライブラリだけで動作し、Docker CLIは不要です。既存の `docker exec` / `docker compose exec` による呼び出しも利用できます。
+
+`docker-command-proxy.cjs` とBashの `command_not_found_handle` による自動転送は廃止しました。従来の呼び出しには `dp` を付けてください。`dp` を付けないコマンドはAIコンテナ内で実行します。
 
 `.aibin/` の専用サポートは廃止しました。PATHへの自動追加と起動時のスキャンは行いません。従来の転送ラッパーは、転送先の実際のコマンド名を使い、`docker-proxy-allow` と `docker-proxy-containers` で設定する方式へ移行してください。
 
@@ -140,6 +155,7 @@ docker compose up -d
 docker-proxy-name=myproject
 docker-proxy-allow=python
 docker-proxy-allow=pytest
+docker-proxy-allow=npx playwright
 docker-proxy-containers=myapp
 docker-proxy-containers=mytools
 ```
@@ -150,34 +166,36 @@ docker-proxy-containers=mytools
 コンテナ "myapp" でのコマンド実行は許可されていません。.aicontainer に docker-proxy-containers=myapp を追加し、aicontainer を起動し直してください。
 ```
 
-Composeのサービス名やIDで指定した場合も、設定には実際のコンテナ名を追加してください。コマンドの自動転送は登録済みのコンテナだけを対象にします。
+Composeのサービス名やIDで指定した場合も、設定には実際のコンテナ名を追加してください。`dp` の転送は登録済みのコンテナだけを対象にします。
 
-3. `aicontainer` を起動し、AIコンテナ内のBashからコマンドを実行
+3. `aicontainer` を起動し、AIコンテナ内から `dp` でコマンドを実行
 
 ```sh
-python script.py
-pytest tests/
-# 非対話Bash（AIツールからの実行）でも有効
-bash -c 'pytest tests/'
+dp npx playwright --version
+dp python script.py
+dp pytest tests/
+# 非対話シェル（AIツールからの実行）でも有効
+bash -c 'dp pytest tests/'
 ```
 
-### 自動転送の動作
+### `dp` の動作
 
-- ローカルのPATHにあるコマンド、Bashの組み込み、関数はそのまま実行します。`.aicontainer` の `path=` によるPATH追加も利用できます。
-- 見つからないコマンドを登録順に試し、転送先にも実行ファイルがない場合だけ次のコンテナへ進みます。実行後の終了コードが127でも再試行しません。
+- `dp` に渡したコマンドは、AIコンテナ内のPATHを検索せず外部コンテナで実行します。`dp` は通常の実行ファイルなので、Bash以外のシェルやプログラムの `spawn` 等からも使用できます。
+- コンテナを登録順に試し、転送先のPATHに実行ファイルがない場合だけ次のコンテナへ進みます。実行後の終了コードが127でも再試行しません。
 - 引数、標準入力、標準出力、標準エラー、終了コードを引き継ぎます。対話端末ではTTYも利用できます。
 - 作業ディレクトリはAIコンテナの現在のディレクトリを指定します。転送先にも同じ絶対パスでプロジェクトをマウントしてください。`.aiignore` は転送先のマウントには適用されません。
-- 許可されていないコマンドは終了コード126、見つからないコマンドは127、接続や実行開始のエラーは125になります。
-- `/path/to/command` や `./command` の自動転送は行いません。Bash以外のシェルや、プログラムからの直接起動（`spawn` 等）にはこのフックは適用されません。
+- 許可されていないコマンドは終了コード126、PATHに見つからないコマンドや起動中の対象コンテナがない場合は127、プロキシ未設定・コンテナ未登録・接続や実行開始のエラーは125になります。
+- `dp /path/to/command` や `dp ./command` も転送先で実行します。引数をシェル文字列に変換せず渡すため、パイプやリダイレクトは呼び出し元のシェルで処理されます。
 
-`docker-proxy-allow=npx playwright` は実際のコマンド列 `npx playwright ...` を許可する設定です。`playwright` への名前変換は行いません。また、ローカルにある `npx` の起動後に発生するエラーは自動転送の対象外です。その場合は `docker exec mytools npx playwright test` などで明示的に呼び出せます。
+`docker-proxy-allow=npx playwright` は実際のコマンド列 `npx playwright ...` を許可する設定です。許可ルールに `dp` は付けません。`dp npx playwright test` と呼び出してください。
 
-この機能はAIイメージに既存のツールが入っている構成でも利用できます。ベースイメージのインストール内容は従来どおりです。更新後は `bash install.sh main` と `bash install.sh proxy` でイメージを再ビルドし、起動済みのプロキシコンテナも作り直してください。
+更新後は `bash install.sh main` でAIイメージを再ビルドしてAIコンテナを起動し直してください。今回の変更に伴うベースイメージやプロキシイメージの再ビルドは不要です。
 
-転送処理のテストはDockerなしで実行できます。
+転送処理と共通指示の注入のテストはDockerなしで実行できます。
 
 ```sh
-node --test test/test_docker_command_proxy.cjs
+node --test test/test_dp.cjs
+python3 -m unittest discover -s test -p 'test_*.py'
 ```
 
 ### セキュリティ

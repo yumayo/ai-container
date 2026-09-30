@@ -50,7 +50,7 @@ AI Container ──(Unix Socket)──> Go Proxy ──(Docker Socket)──> Do
 - `containers/json`, `containers/{id}/json`: 未登録コンテナも参照でき、`docker compose ps` に表示される。クエリによるDocker側のフィルタは維持する
 - `containers/{id}/exec`: URLパスからコンテナ名/IDを抽出し、許可リストにない場合は403。実際のコンテナ名を `docker-proxy-containers` に追加するよう日本語で案内する
 - コンテナ名は完全一致のほか、短縮ID（12文字以上のprefix）でもマッチする
-- コマンドの自動転送は、一覧に含まれる登録済みの起動中コンテナだけを対象にする
+- `dp` によるコマンド転送は、一覧に含まれる登録済みの起動中コンテナだけを対象にする
 
 ### exec/start のストリーム中継
 
