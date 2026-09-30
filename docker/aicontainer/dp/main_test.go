@@ -38,9 +38,9 @@ func TestCopyOutput(t *testing.T) {
 		{"empty frame", append(frame(1, ""), frame(2, "err")...), false, "", "err", ""},
 		{"tty", []byte("raw terminal\r\n"), true, "raw terminal\r\n", "", ""},
 		{"empty output", nil, false, "", "", ""},
-		{"truncated header", frame(1, "out")[:3], false, "", "", "Truncated"},
-		{"truncated payload", frame(1, "output")[:10], false, "ou", "", "Truncated"},
-		{"invalid channel", frame(3, "out"), false, "", "", "Invalid"},
+		{"truncated header", frame(1, "out")[:3], false, "", "", "途中で途切れました"},
+		{"truncated payload", frame(1, "output")[:10], false, "ou", "", "途中で途切れました"},
+		{"invalid channel", frame(3, "out"), false, "", "", "形式が不正です"},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {

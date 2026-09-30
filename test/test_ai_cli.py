@@ -104,7 +104,7 @@ sys.exit(17)
                 result = self.run_cli(tool)
                 self.assertEqual(result.returncode, 1)
                 self.assertEqual(result.stdout, "")
-                self.assertIn("cannot read system prompt", result.stderr)
+                self.assertIn("共通システムプロンプトを読み込めません", result.stderr)
 
 
 if __name__ == "__main__":

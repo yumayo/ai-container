@@ -6,7 +6,7 @@ prompt_file=/etc/aicontainer/system-prompt.md
 tool="${0##*/}"
 
 if [[ ! -r "$prompt_file" ]]; then
-    printf 'aicontainer: cannot read system prompt: %s\n' "$prompt_file" >&2
+    printf 'aicontainer: 共通システムプロンプトを読み込めません: %s\n' "$prompt_file" >&2
     exit 1
 fi
 
@@ -20,7 +20,7 @@ case "$tool" in
         exec /usr/local/lib/aicontainer/bin/codex -c "developer_instructions=$instructions" "$@"
         ;;
     *)
-        printf 'aicontainer: unsupported AI tool: %s\n' "$tool" >&2
+        printf 'aicontainer: 対応していない AI ツールです: %s\n' "$tool" >&2
         exit 2
         ;;
 esac

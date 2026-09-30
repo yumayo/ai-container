@@ -21,18 +21,20 @@ import (
 
 const requestTimeout = 10 * time.Second
 
-var errMissingExecutable = errors.New("executable file not found in $PATH")
+var errMissingExecutable = errors.New("PATH に実行ファイルが見つかりません")
 
 type dockerError struct {
 	status  int
 	message string
 }
 
-func (e *dockerError) Error() string { return e.message }
+func (e *dockerError) Error() string {
+	return fmt.Sprintf("Docker プロキシでエラーが発生しました（HTTP %d）。詳細: %s", e.status, e.message)
+}
 
 type signalExit struct{ code int }
 
-func (e *signalExit) Error() string { return fmt.Sprintf("interrupted (exit %d)", e.code) }
+func (e *signalExit) Error() string { return fmt.Sprintf("処理が中断されました（終了コード %d）", e.code) }
 
 type dockerClient struct{ socketPath string }
 
@@ -44,12 +46,12 @@ func (c dockerClient) open(method, path string, body any, upgrade bool) (*http.R
 	if body != nil {
 		payload, err = json.Marshal(body)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, fmt.Errorf("Docker へのリクエストを作成できませんでした。詳細: %w", err)
 		}
 	}
 	req, err := http.NewRequest(method, "http://docker"+path, bytes.NewReader(payload))
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, fmt.Errorf("Docker へのリクエストが不正です。詳細: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if upgrade {
@@ -60,7 +62,7 @@ func (c dockerClient) open(method, path string, body any, upgrade bool) (*http.R
 	}
 	connection, err := net.DialTimeout("unix", c.socketPath, requestTimeout)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, fmt.Errorf("Docker プロキシに接続できませんでした。プロキシの起動状態とソケットの設定を確認してください。詳細: %w", err)
 	}
 	conn := connection.(*net.UnixConn)
 	// Limit only the HTTP exchange, never the remote command's execution time.
@@ -74,7 +76,7 @@ func (c dockerClient) open(method, path string, body any, upgrade bool) (*http.R
 	}
 	if err != nil {
 		conn.Close()
-		return nil, nil, nil, err
+		return nil, nil, nil, fmt.Errorf("Docker プロキシとの通信に失敗しました。詳細: %w", err)
 	}
 	return res, conn, reader, nil
 }
@@ -82,14 +84,14 @@ func (c dockerClient) open(method, path string, body any, upgrade bool) (*http.R
 func responseError(res *http.Response) error {
 	data, err := io.ReadAll(res.Body)
 	if err != nil {
-		return err
+		return fmt.Errorf("Docker からの応答を読み取れませんでした。詳細: %w", err)
 	}
 	var result struct{ Message string }
 	if json.Unmarshal(data, &result) != nil || result.Message == "" {
 		result.Message = strings.TrimSpace(string(data))
 	}
 	if result.Message == "" {
-		result.Message = fmt.Sprintf("Docker HTTP %d", res.StatusCode)
+		result.Message = "エラーの詳細は返されませんでした。"
 	}
 	return &dockerError{status: res.StatusCode, message: result.Message}
 }
@@ -106,11 +108,11 @@ func (c dockerClient) request(method, path string, body, result any) error {
 	}
 	data, err := io.ReadAll(res.Body)
 	if err != nil {
-		return err
+		return fmt.Errorf("Docker からの応答を読み取れませんでした。詳細: %w", err)
 	}
 	if result != nil {
 		if err := json.Unmarshal(data, result); err != nil {
-			return fmt.Errorf("Invalid Docker response: %w", err)
+			return fmt.Errorf("Docker からの応答が不正です。詳細: %w", err)
 		}
 	}
 	return nil
@@ -119,7 +121,10 @@ func (c dockerClient) request(method, path string, body, result any) error {
 func copyOutput(input io.Reader, stdout, stderr io.Writer, tty bool) error {
 	if tty {
 		_, err := io.Copy(stdout, input)
-		return err
+		if err != nil {
+			return fmt.Errorf("コマンドの出力を転送できませんでした。詳細: %w", err)
+		}
+		return nil
 	}
 	var header [8]byte
 	for {
@@ -128,13 +133,13 @@ func copyOutput(input io.Reader, stdout, stderr io.Writer, tty bool) error {
 			return nil
 		}
 		if err == io.ErrUnexpectedEOF {
-			return errors.New("Truncated Docker output stream")
+			return errors.New("Docker からの出力データが途中で途切れました")
 		}
 		if err != nil {
-			return err
+			return fmt.Errorf("Docker からの出力を読み取れませんでした。詳細: %w", err)
 		}
 		if (header[0] != 1 && header[0] != 2) || header[1] != 0 || header[2] != 0 || header[3] != 0 {
-			return errors.New("Invalid Docker output stream")
+			return errors.New("Docker からの出力データの形式が不正です")
 		}
 		output := stdout
 		if header[0] == 2 {
@@ -142,10 +147,10 @@ func copyOutput(input io.Reader, stdout, stderr io.Writer, tty bool) error {
 		}
 		_, err = io.CopyN(output, input, int64(binary.BigEndian.Uint32(header[4:])))
 		if err == io.EOF {
-			return errors.New("Truncated Docker output stream")
+			return errors.New("Docker からの出力データが途中で途切れました")
 		}
 		if err != nil {
-			return err
+			return fmt.Errorf("コマンドの出力を転送できませんでした。詳細: %w", err)
 		}
 	}
 }
@@ -163,7 +168,7 @@ func (c dockerClient) stream(id string, conn *net.UnixConn, output io.Reader, tt
 	if tty {
 		restore, err := makeRaw(os.Stdin.Fd())
 		if err != nil {
-			return err
+			return fmt.Errorf("端末を対話用モードに切り替えられませんでした。詳細: %w", err)
 		}
 		defer restore()
 		go c.resize(id)
@@ -212,7 +217,7 @@ func (c dockerClient) execute(id string, tty bool) (int, error) {
 		return 0, err
 	}
 	if err := conn.SetDeadline(time.Time{}); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("Docker プロキシ接続のタイムアウト設定を解除できませんでした。詳細: %w", err)
 	}
 	var output io.Reader = reader
 	if res.StatusCode == http.StatusOK {
@@ -230,7 +235,7 @@ func (c dockerClient) execute(id string, tty bool) (int, error) {
 		return 0, err
 	}
 	if info.Running || info.ExitCode == nil || *info.ExitCode < 0 || *info.ExitCode > 255 {
-		return 0, errors.New("Docker did not return a completed command exit code")
+		return 0, errors.New("Docker から実行完了後の終了コードを取得できませんでした")
 	}
 	return *info.ExitCode, nil
 }
@@ -262,7 +267,7 @@ func configuredContainers(value string) []string {
 }
 
 func run(cmd []string) (int, error) {
-	const usage = "Usage: dp COMMAND [ARG ...]\nExample: dp npx playwright --version"
+	const usage = "使い方: dp コマンド [引数 ...]\n例: dp npx playwright --version"
 	if len(cmd) == 0 {
 		fmt.Fprintln(os.Stderr, usage)
 		return 2, nil
@@ -273,7 +278,7 @@ func run(cmd []string) (int, error) {
 	}
 	host := os.Getenv("DOCKER_HOST")
 	if !strings.HasPrefix(host, "unix:///") {
-		return 0, errors.New("Docker proxy is not configured. Set docker-proxy-name in .aicontainer and restart aicontainer (DOCKER_HOST must be unix:///...).")
+		return 0, errors.New("Docker プロキシが設定されていません。.aicontainer に docker-proxy-name を設定し、aicontainer を起動し直してください（DOCKER_HOST は unix:///... 形式で指定します）。")
 	}
 	client := dockerClient{socketPath: strings.TrimPrefix(host, "unix://")}
 	var containers []struct{ Names []string }
@@ -281,7 +286,7 @@ func run(cmd []string) (int, error) {
 		return 0, err
 	}
 	if containers == nil {
-		return 0, errors.New("Invalid Docker containers response")
+		return 0, errors.New("Docker から取得したコンテナ一覧の形式が不正です")
 	}
 	visible := make(map[string]bool)
 	for _, container := range containers {
@@ -291,11 +296,11 @@ func run(cmd []string) (int, error) {
 	}
 	names := configuredContainers(os.Getenv("DOCKER_PROXY_CONTAINERS"))
 	if len(names) == 0 {
-		return 0, errors.New("No containers are registered. Set docker-proxy-containers in .aicontainer and restart aicontainer.")
+		return 0, errors.New("実行先のコンテナが登録されていません。.aicontainer に docker-proxy-containers を設定し、aicontainer を起動し直してください。")
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("現在の作業ディレクトリを取得できませんでした。詳細: %w", err)
 	}
 	tty := isTerminal(os.Stdin.Fd()) && isTerminal(os.Stdout.Fd()) && isTerminal(os.Stderr.Fd())
 	attempted := false
@@ -320,7 +325,7 @@ func run(cmd []string) (int, error) {
 			return 0, err
 		}
 		if !validExecID(exec.Id) {
-			return 0, errors.New("Invalid Docker exec ID")
+			return 0, errors.New("Docker から取得した実行 ID が不正です")
 		}
 		code, err := client.execute(exec.Id, tty)
 		// Never retry an executed command, a missing working directory, or a
@@ -331,9 +336,9 @@ func run(cmd []string) (int, error) {
 		return code, err
 	}
 	if !attempted {
-		fmt.Fprintln(os.Stderr, "dp: No registered containers are running. Check docker-proxy-containers in .aicontainer and start the target containers.")
+		fmt.Fprintln(os.Stderr, "dp: 登録済みのコンテナが起動していません。.aicontainer の docker-proxy-containers を確認し、対象のコンテナを起動してください。")
 	} else {
-		fmt.Fprintf(os.Stderr, "dp: %s: command not found in registered running containers\n", cmd[0])
+		fmt.Fprintf(os.Stderr, "dp: 登録済みの起動中コンテナにコマンド %q が見つかりません\n", cmd[0])
 	}
 	return 127, nil
 }

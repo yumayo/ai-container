@@ -22,7 +22,7 @@ before(async () => {
     path.join(sourceDir, 'main.go'), path.join(sourceDir, 'terminal_linux.go')], {
     env: { ...process.env, CGO_ENABLED: '0' }, encoding: 'utf8',
   });
-  if (result.error) throw new Error(`Go is required to build dp: ${result.error.message}`);
+  if (result.error) throw new Error(`dp のビルドには Go が必要です。詳細: ${result.error.message}`);
   assert.equal(result.status, 0, result.stdout + result.stderr);
 });
 
@@ -213,7 +213,10 @@ test('allow-list denial is reported without starting or retrying the command', a
 
 test('a missing working directory stops execution rather than trying another container', async (t) => {
   const { run, calls } = await fixture(t, { startError: 'chdir to cwd: no such file or directory' });
-  assert.equal((await run()).code, 125);
+  const result = await run();
+  assert.equal(result.code, 125);
+  assert.match(result.stderr, /Docker プロキシでエラーが発生しました/);
+  assert.match(result.stderr, /chdir to cwd: no such file or directory/);
   assert.equal(calls.filter((c) => c.path.endsWith('/start')).length, 1);
 });
 
@@ -221,7 +224,7 @@ test('all absent executables return 127', async (t) => {
   const { run } = await fixture(t, { absent: ['first', 'second'] });
   const result = await run();
   assert.equal(result.code, 127);
-  assert.match(result.stderr, /command not found/);
+  assert.match(result.stderr, /コマンド .* が見つかりません/);
 });
 
 test('an empty allowed container list reports the required setting without creating an exec', async (t) => {
@@ -243,6 +246,7 @@ test('disconnected proxy returns an actionable error', async (t) => {
   const { run, dir } = await fixture(t);
   const result = await run([missing], { env: { DOCKER_HOST: `unix://${dir}/missing.sock` } });
   assert.equal(result.code, 125);
+  assert.match(result.stderr, /Docker プロキシに接続できませんでした/);
   assert.match(result.stderr, /no such file or directory/);
 });
 
@@ -294,7 +298,7 @@ test('stopped registered containers are reported without creating an exec', asyn
   const { run, calls } = await fixture(t);
   const result = await run([missing], { env: { DOCKER_PROXY_CONTAINERS: 'stopped' } });
   assert.equal(result.code, 127);
-  assert.match(result.stderr, /No registered containers are running/);
+  assert.match(result.stderr, /登録済みのコンテナが起動していません/);
   assert.equal(calls.length, 1);
 });
 
@@ -302,7 +306,7 @@ test('usage and help work without a proxy', async (t) => {
   const { run, calls } = await fixture(t);
   const usage = await run([], { env: { DOCKER_HOST: '' } });
   assert.equal(usage.code, 2);
-  assert.match(usage.stderr, /Usage: dp COMMAND/);
+  assert.match(usage.stderr, /使い方: dp コマンド/);
   const help = await run(['--help'], { env: { DOCKER_HOST: '' } });
   assert.equal(help.code, 0);
   assert.match(help.stdout, /dp npx playwright --version/);
@@ -313,6 +317,6 @@ test('truncated output is an error and never executes on a second container', as
   const { run, calls } = await fixture(t, { output: frame(1, 'payload').subarray(0, 10) });
   const result = await run();
   assert.equal(result.code, 125);
-  assert.match(result.stderr, /Truncated/);
+  assert.match(result.stderr, /途中で途切れました/);
   assert.equal(calls.filter((c) => c.path.endsWith('/start')).length, 1);
 });
