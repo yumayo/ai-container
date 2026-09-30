@@ -1,3 +1,10 @@
+FROM golang:1.26-alpine AS dp-builder
+WORKDIR /build
+COPY ./dp/ .
+RUN go mod init aicontainer-dp && \
+    CGO_ENABLED=0 go test ./... && \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /dp .
+
 FROM yumayo-ai-base
 
 RUN curl -fsSL https://claude.ai/install.sh | bash
@@ -10,7 +17,7 @@ RUN bash -c "source $HOME/.nvm/nvm.sh && npm install -g @openai/codex"
 RUN echo 'export PATH="$HOME/.nvm/versions/node/$(node --version)/bin:$PATH"' >> /home/ubuntu/.bashrc
 
 # dpで明示的にDocker Socket Proxy経由のコマンド実行を行う。
-COPY --chmod=0755 ./dp /usr/local/bin/dp
+COPY --from=dp-builder /dp /usr/local/bin/dp
 
 # 共通指示を各CLIのシステム／開発者指示として渡す。セッションの設定は書き換えない。
 COPY --chmod=0644 ./system-prompt.md /etc/aicontainer/system-prompt.md

@@ -1,7 +1,7 @@
 'use strict';
 
 // Dockerなしでdpの明示実行、Unix socket、HTTP upgradeを検証する。
-const { test } = require('node:test');
+const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
 const fs = require('node:fs/promises');
@@ -10,8 +10,25 @@ const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 const { once } = require('node:events');
 
-const client = path.resolve(__dirname, '../docker/aicontainer/dp');
+let client, buildDir;
 const missing = 'aicontainer-missing-command-for-test';
+
+// テスト用バイナリは一時ディレクトリへビルドし、ソースツリーには残さない。
+before(async () => {
+  buildDir = await fs.mkdtemp(path.join(os.tmpdir(), 'dp-build-'));
+  client = path.join(buildDir, 'dp');
+  const sourceDir = path.resolve(__dirname, '../docker/aicontainer/dp');
+  const result = spawnSync('go', ['build', '-trimpath', '-ldflags=-s -w', '-o', client,
+    path.join(sourceDir, 'main.go'), path.join(sourceDir, 'terminal_linux.go')], {
+    env: { ...process.env, CGO_ENABLED: '0' }, encoding: 'utf8',
+  });
+  if (result.error) throw new Error(`Go is required to build dp: ${result.error.message}`);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
+after(async () => {
+  if (buildDir) await fs.rm(buildDir, { recursive: true, force: true });
+});
 
 function frame(channel, text) {
   const data = Buffer.from(text);
@@ -46,6 +63,7 @@ async function fixture(t, options = {}) {
       execs.set(id, container);
       json(res, 201, { Id: id });
     } else if (/^\/exec\/\w+\/json$/.test(req.url)) {
+      if (options.inspectError) return json(res, 500, { message: options.inspectError });
       json(res, 200, { Running: false, ExitCode: options.exitCode || 0 });
     } else if (req.url.includes('/resize?')) {
       json(res, 200, null);
@@ -78,7 +96,9 @@ async function fixture(t, options = {}) {
     socket.write(options.http200
       ? 'HTTP/1.1 200 OK\r\nContent-Type: application/vnd.docker.raw-stream\r\nConnection: close\r\n\r\n'
       : 'HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n');
-    if (options.echoInput) {
+    if (options.waitForSignal) {
+      socket.write(frame(1, 'ready\n'));
+    } else if (options.echoInput) {
       const input = [body.subarray(length)];
       socket.on('data', (chunk) => input.push(chunk));
       socket.on('end', () => socket.end(frame(1, Buffer.concat(input))));
@@ -110,6 +130,7 @@ async function fixture(t, options = {}) {
       });
     const stdout = [], stderr = [];
     child.stdout.on('data', (chunk) => stdout.push(chunk));
+    if (config.signal) child.stdout.once('data', () => child.kill(config.signal));
     child.stderr.on('data', (chunk) => stderr.push(chunk));
     child.stdin.on('error', () => {});
     child.stdin.end(config.input || '');
@@ -166,6 +187,21 @@ test('executed command exit code 127 never triggers a second execution', async (
   assert.equal(calls.filter((c) => c.path.endsWith('/start')).length, 1);
 });
 
+test('errors after command execution never trigger a second execution', async (t) => {
+  const { run, calls } = await fixture(t, { inspectError: 'executable file not found in $PATH' });
+  assert.equal((await run()).code, 125);
+  assert.equal(calls.filter((c) => c.path.endsWith('/start')).length, 1);
+});
+
+test('SIGINT and SIGTERM stop streaming with the conventional exit code', async (t) => {
+  const { run, calls } = await fixture(t, { waitForSignal: true });
+  for (const [signal, code] of [['SIGINT', 130], ['SIGTERM', 143]]) {
+    const result = await run([missing], { signal });
+    assert.deepEqual(result, { code, stdout: 'ready\n', stderr: '' });
+  }
+  assert.equal(calls.filter((c) => c.path.endsWith('/json') && !c.path.startsWith('/containers')).length, 0);
+});
+
 test('allow-list denial is reported without starting or retrying the command', async (t) => {
   const { run, calls } = await fixture(t, { forbidden: true });
   const result = await run();
@@ -207,7 +243,7 @@ test('disconnected proxy returns an actionable error', async (t) => {
   const { run, dir } = await fixture(t);
   const result = await run([missing], { env: { DOCKER_HOST: `unix://${dir}/missing.sock` } });
   assert.equal(result.code, 125);
-  assert.match(result.stderr, /ENOENT/);
+  assert.match(result.stderr, /no such file or directory/);
 });
 
 test('Bash does not forward commands without dp', async (t) => {
@@ -235,6 +271,12 @@ test('dp forwards explicit executable paths without consulting the local filesys
     assert.equal((await run([command, '--version'])).code, 0);
     assert.deepEqual(calls.filter((c) => c.path.endsWith('/exec')).at(-1).body.Cmd, [command, '--version']);
   }
+});
+
+test('dp runs without Node.js or any other program on PATH', async (t) => {
+  const { run } = await fixture(t);
+  const result = await run(['npx', 'playwright', '--version'], { env: { PATH: '/nonexistent' } });
+  assert.deepEqual(result, { code: 0, stdout: 'stdout\n', stderr: 'stderr\n' });
 });
 
 test('a disabled or non-Unix proxy reports configuration guidance without executing locally', async (t) => {

@@ -127,7 +127,7 @@ ${API_KEY?}:/workspace/api-key
 
 ## Docker Socket Proxy（外部コンテナ連携）
 
-AIコンテナ内で `dp COMMAND [ARG ...]` を実行すると、`docker-proxy-containers` に登録した起動中のコンテナへ Docker Socket Proxy 経由で転送します。ローカルに同名のコマンドが存在しても、`dp npx playwright --version` のように外部コンテナで実行できます。`dp` はNode.jsの標準ライブラリだけで動作し、Docker CLIは不要です。既存の `docker exec` / `docker compose exec` による呼び出しも利用できます。
+AIコンテナ内で `dp COMMAND [ARG ...]` を実行すると、`docker-proxy-containers` に登録した起動中のコンテナへ Docker Socket Proxy 経由で転送します。ローカルに同名のコマンドが存在しても、`dp npx playwright --version` のように外部コンテナで実行できます。`dp` はGoの標準ライブラリだけで実装した静的リンクのバイナリで、実行時にNode.jsやDocker CLIは不要です。既存の `docker exec` / `docker compose exec` による呼び出しも利用できます。
 
 `docker-command-proxy.cjs` とBashの `command_not_found_handle` による自動転送は廃止しました。従来の呼び出しには `dp` を付けてください。`dp` を付けないコマンドはAIコンテナ内で実行します。
 
@@ -191,10 +191,20 @@ bash -c 'dp pytest tests/'
 
 更新後は `bash install.sh main` でAIイメージを再ビルドしてAIコンテナを起動し直してください。今回の変更に伴うベースイメージやプロキシイメージの再ビルドは不要です。
 
-転送処理と共通指示の注入のテストはDockerなしで実行できます。
+`dp` のソースは `docker/aicontainer/dp/` にあります。AIイメージのビルド時にGo用ステージでテスト・コンパイルし、`CGO_ENABLED=0` と `-trimpath -ldflags="-s -w"` で生成したバイナリだけを `/usr/local/bin/dp` にコピーします。Goのコンパイラやソースは実行用イメージに追加しません。
+
+転送処理のテストはLinux上でGoを使い、Dockerなしで実行できます。Node.jsの結合テストは、一時ディレクトリにGo版 `dp` をビルドして実行します（テストの実行にはGoとNode.jsが必要です）。
 
 ```sh
+cd docker/aicontainer/dp
+go test main.go terminal_linux.go main_test.go terminal_linux_test.go
+cd ../../..
 node --test test/test_dp.cjs
+```
+
+共通指示の注入・起動設定のテスト:
+
+```sh
 python3 -m unittest discover -s test -p 'test_*.py'
 ```
 
