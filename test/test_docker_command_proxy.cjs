@@ -41,7 +41,7 @@ async function fixture(t, options = {}) {
     if (req.url === '/containers/json') {
       json(res, 200, containers.map((name) => ({ Names: [`/${name}`] })));
     } else if (/^\/containers\/[^/]+\/exec$/.test(req.url)) {
-      if (options.forbidden) return json(res, 403, { message: 'Forbidden: command is not allowed' });
+      if (options.forbidden) return json(res, 403, { message: 'コマンドは許可されていません。docker-proxy-allow を確認してください。' });
       const container = decodeURIComponent(req.url.split('/')[2]);
       const id = `exec${execs.size}`;
       execs.set(id, container);
@@ -170,7 +170,7 @@ test('allow-list denial is reported without starting or retrying the command', a
   const { run, calls } = await fixture(t, { forbidden: true });
   const result = await run();
   assert.equal(result.code, 126);
-  assert.match(result.stderr, /Forbidden/);
+  assert.match(result.stderr, /許可されていません。docker-proxy-allow/);
   assert.equal(calls.filter((c) => c.path.endsWith('/exec')).length, 1);
   assert.equal(calls.filter((c) => c.path.endsWith('/start')).length, 0);
 });
@@ -189,9 +189,16 @@ test('all absent executables return 127', async (t) => {
 });
 
 test('an empty allowed container list returns 127 without creating an exec', async (t) => {
-  const { run, calls } = await fixture(t, { containers: [] });
-  assert.equal((await run()).code, 127);
+  const { run, calls } = await fixture(t);
+  assert.equal((await run([missing], { env: { DOCKER_PROXY_CONTAINERS: '' } })).code, 127);
   assert.equal(calls.length, 1);
+});
+
+test('unregistered visible containers are never tried by automatic command forwarding', async (t) => {
+  const { run, calls } = await fixture(t, { containers: ['unregistered', 'registered'], absent: ['registered'] });
+  const result = await run([missing], { env: { DOCKER_PROXY_CONTAINERS: 'registered\nstopped' } });
+  assert.equal(result.code, 127);
+  assert.deepEqual(calls.filter((c) => c.path.endsWith('/exec')).map((c) => c.path), ['/containers/registered/exec']);
 });
 
 test('disconnected proxy returns an actionable error', async (t) => {

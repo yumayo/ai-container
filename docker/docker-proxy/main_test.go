@@ -97,8 +97,8 @@ func TestLoadContainerList(t *testing.T) {
 	}
 }
 
-func TestWildcardExecAccess(t *testing.T) {
-	// Use a fake Docker Unix socket to verify API forwarding and access control.
+func newDockerTestSocket(t *testing.T, handler http.HandlerFunc) string {
+	t.Helper()
 	dir, err := os.MkdirTemp("", "proxy-test-")
 	if err != nil {
 		t.Fatal(err)
@@ -109,8 +109,16 @@ func TestWildcardExecAccess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	upstream := &http.Server{Handler: handler}
+	go upstream.Serve(listener)
+	t.Cleanup(func() { upstream.Close() })
+	return socketPath
+}
+
+func TestWildcardExecAccess(t *testing.T) {
+	// Use a fake Docker Unix socket to verify API forwarding and access control.
 	forwarded := make(chan []string, 1)
-	upstream := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	socketPath := newDockerTestSocket(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/containers/tools/exec" {
 			http.Error(w, "unexpected upstream request", http.StatusBadRequest)
 			return
@@ -126,9 +134,7 @@ func TestWildcardExecAccess(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		io.WriteString(w, `{"Id":"exec123"}`)
-	})}
-	go upstream.Serve(listener)
-	t.Cleanup(func() { upstream.Close() })
+	})
 
 	tests := []struct {
 		name      string
@@ -142,6 +148,7 @@ func TestWildcardExecAccess(t *testing.T) {
 		{"argument wildcard forwards matching command", []allowRule{{"npx", "playwright*"}}, "tools", []string{"npx", "playwright@latest", "test"}, http.StatusCreated},
 		{"nonmatching command denied", []allowRule{{"python*"}}, "tools", []string{"ruby", "script.rb"}, http.StatusForbidden},
 		{"nonmatching argument denied", []allowRule{{"npx", "playwright*"}}, "tools", []string{"npx", "webpack"}, http.StatusForbidden},
+		{"denied command with JSON metacharacters", []allowRule{{"python"}}, "tools", []string{"ruby", "\"quoted\"\nC:\\temp"}, http.StatusForbidden},
 		{"global wildcard keeps container restriction", []allowRule{{"*"}}, "other", []string{"git", "status"}, http.StatusForbidden},
 		{"unconfigured commands denied", nil, "tools", []string{"git", "status"}, http.StatusForbidden},
 		{"missing command rejected", []allowRule{{"*"}}, "tools", nil, http.StatusBadRequest},
@@ -159,6 +166,21 @@ func TestWildcardExecAccess(t *testing.T) {
 			if response.Code != tt.want {
 				t.Fatalf("status = %d, want %d; body = %s", response.Code, tt.want, response.Body.String())
 			}
+			if tt.want == http.StatusForbidden {
+				var body struct {
+					Message string `json:"message"`
+				}
+				if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+					t.Fatalf("invalid JSON error response: %v", err)
+				}
+				setting := "docker-proxy-allow"
+				if tt.container != "tools" {
+					setting = "docker-proxy-containers=" + tt.container
+				}
+				if !strings.Contains(body.Message, setting) || !strings.Contains(body.Message, "してください") {
+					t.Fatalf("missing Japanese configuration guidance: %q", body.Message)
+				}
+			}
 			select {
 			case got := <-forwarded:
 				if tt.want != http.StatusCreated {
@@ -173,5 +195,115 @@ func TestWildcardExecAccess(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestContainerListingAndInspectIncludeUnregisteredContainers(t *testing.T) {
+	for _, allowed := range [][]string{nil, {"tools"}} {
+		for _, prefix := range []string{"/", "/v1.55/"} {
+			for _, endpoint := range []struct {
+				path string
+				body string
+			}{
+				{"containers/json?all=1&filters=%7B%22label%22%3A%5B%22com.docker.compose.project%3Dsample%22%5D%7D", `[{"Id":"abc123","Names":["/tools"]},{"Id":"def456","Names":["/sample-web-1"]}]`},
+				// Compose ps inspects each listed container to read state and health.
+				{"containers/def456/json", `{"Name":"/sample-web-1","State":{"Status":"running","Health":{"Status":"healthy"}}}`},
+			} {
+				t.Run(strings.Join(allowed, ",")+prefix+endpoint.path, func(t *testing.T) {
+					uri := prefix + endpoint.path
+					socketPath := newDockerTestSocket(t, func(w http.ResponseWriter, r *http.Request) {
+						if r.Method != http.MethodGet || r.URL.RequestURI() != uri {
+							t.Errorf("upstream request = %s %s, want GET %s", r.Method, r.URL.RequestURI(), uri)
+						}
+						w.Header().Set("Content-Type", "application/json")
+						io.WriteString(w, endpoint.body)
+					})
+					p := newProxy(nil, allowed, socketPath)
+					response := httptest.NewRecorder()
+					p.ServeHTTP(response, httptest.NewRequest(http.MethodGet, uri, nil))
+					if response.Code != http.StatusOK || response.Body.String() != endpoint.body {
+						t.Fatalf("response = %d %s, want 200 %s", response.Code, response.Body.String(), endpoint.body)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestExecContainerAccessByNameAndID(t *testing.T) {
+	fullID := strings.Repeat("a", 64)
+	shortID := fullID[:12]
+	for _, allowed := range [][]string{nil, {"tools"}, {"sample-web-1"}} {
+		for _, nameOrID := range []string{"sample-web-1", shortID, fullID} {
+			t.Run(strings.Join(allowed, ",")+"/"+nameOrID, func(t *testing.T) {
+				forwarded := make(chan string, 1)
+				socketPath := newDockerTestSocket(t, func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					switch {
+					case r.Method == http.MethodGet && (r.URL.Path == "/containers/"+shortID+"/json" || r.URL.Path == "/containers/"+fullID+"/json"):
+						io.WriteString(w, `{"Name":"/sample-web-1"}`)
+					case r.Method == http.MethodPost && r.URL.Path == "/v1.55/containers/"+nameOrID+"/exec":
+						forwarded <- r.URL.Path
+						w.WriteHeader(http.StatusCreated)
+						io.WriteString(w, `{"Id":"exec123"}`)
+					default:
+						t.Errorf("unexpected upstream request: %s %s", r.Method, r.URL.Path)
+						w.WriteHeader(http.StatusNotFound)
+					}
+				})
+				p := newProxy([]allowRule{{"*"}}, allowed, socketPath)
+				response := httptest.NewRecorder()
+				p.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1.55/containers/"+nameOrID+"/exec", strings.NewReader(`{"Cmd":["python"]}`)))
+				if len(allowed) == 1 && allowed[0] == "sample-web-1" {
+					if response.Code != http.StatusCreated || len(forwarded) != 1 {
+						t.Fatalf("allowed exec was not forwarded: %d %s", response.Code, response.Body.String())
+					}
+					return
+				}
+				if response.Code != http.StatusForbidden || len(forwarded) != 0 {
+					t.Fatalf("unregistered exec was not denied: %d %s", response.Code, response.Body.String())
+				}
+				var body struct {
+					Message string `json:"message"`
+				}
+				if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+					t.Fatal(err)
+				}
+				for _, want := range []string{"許可されていません", "docker-proxy-containers=sample-web-1", "追加し", "起動し直してください"} {
+					if !strings.Contains(body.Message, want) {
+						t.Errorf("error %q does not contain %q", body.Message, want)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestUnknownContainerIDFailsClosed(t *testing.T) {
+	socketPath := newDockerTestSocket(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("unexpected upstream method: %s", r.Method)
+		}
+		w.WriteHeader(http.StatusNotFound)
+	})
+	p := newProxy([]allowRule{{"*"}}, []string{"tools"}, socketPath)
+	response := httptest.NewRecorder()
+	p.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/containers/abcdef123456/exec", strings.NewReader(`{"Cmd":["python"]}`)))
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "docker-proxy-containers に対象コンテナの実際の名前を追加") {
+		t.Fatalf("missing guidance for unknown ID: %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestOtherOperationsRemainForbidden(t *testing.T) {
+	p := newProxy([]allowRule{{"*"}}, []string{"tools"}, "unused.sock")
+	for _, request := range []struct{ method, path string }{
+		{http.MethodPost, "/containers/create"},
+		{http.MethodDelete, "/containers/tools"},
+	} {
+		response := httptest.NewRecorder()
+		p.ServeHTTP(response, httptest.NewRequest(request.method, request.path, nil))
+		if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "この操作は許可されていません") {
+			t.Errorf("response = %d %s, want Japanese 403 error", response.Code, response.Body.String())
+		}
 	}
 }

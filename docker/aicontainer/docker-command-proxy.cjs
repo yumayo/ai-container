@@ -176,13 +176,13 @@ async function main() {
   const socketPath = host.slice('unix://'.length);
   const containers = await request(socketPath, 'GET', '/containers/json');
   if (!Array.isArray(containers)) throw new Error('Invalid Docker containers response');
-  // 一覧はプロキシが許可済み・起動中コンテナだけにフィルタする。
+  // 一覧には未許可のコンテナも含まれるため、設定された起動中コンテナだけを試す。
   const visible = new Set(containers.flatMap((c) => c.Names || []).map((n) => n.replace(/^\//, '')));
   const configured = (process.env.DOCKER_PROXY_CONTAINERS || '')
     .replaceAll('\r\n', '\n')
     .replaceAll('\r', '\n')
     .split('\n').map((n) => n.trim()).filter(Boolean);
-  const targets = [...new Set(configured.length ? configured : visible)].filter((n) => visible.has(n));
+  const targets = [...new Set(configured)].filter((n) => visible.has(n));
   const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY && process.stderr.isTTY);
   for (const container of targets) {
     const exec = await request(socketPath, 'POST', `/containers/${encodeURIComponent(container)}/exec`, {

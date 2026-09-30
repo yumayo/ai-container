@@ -120,7 +120,7 @@ AIコンテナのBashで見つからないコマンドは、`docker-proxy-contai
 
 ```
 AI Container ──(Unix Socket)──> Go Proxy ──(Docker Socket)──> Docker Engine
-  DOCKER_HOST=/var/run/            exec以外を                  /var/run/
+  DOCKER_HOST=/var/run/            未許可の操作を              /var/run/
   docker-proxy/docker.sock         403で拒否                   docker.sock
 ```
 
@@ -143,6 +143,14 @@ docker-proxy-allow=pytest
 docker-proxy-containers=myapp
 docker-proxy-containers=mytools
 ```
+
+`docker ps` / `docker compose ps` の一覧には、`docker-proxy-containers` に未登録のコンテナも表示されます。Composeのプロジェクト指定など、通常の表示条件はそのまま適用されます。一覧・詳細の参照は登録不要ですが、未登録のコンテナでコマンドを実行すると403エラーになります。
+
+```text
+コンテナ "myapp" でのコマンド実行は許可されていません。.aicontainer に docker-proxy-containers=myapp を追加し、aicontainer を起動し直してください。
+```
+
+Composeのサービス名やIDで指定した場合も、設定には実際のコンテナ名を追加してください。コマンドの自動転送は登録済みのコンテナだけを対象にします。
 
 3. `aicontainer` を起動し、AIコンテナ内のBashからコマンドを実行
 
@@ -176,7 +184,7 @@ node --test test/test_docker_command_proxy.cjs
 
 プロキシは2段階でアクセスを制限します。
 
-**APIレベル**: `exec` 関連のエンドポイントのみ許可します。コンテナの作成・削除やイメージ操作は全て拒否されます。
+**APIレベル**: コンテナの一覧・詳細の参照と `exec` 関連のエンドポイントを許可します。コマンドの実行先は `docker-proxy-containers` に登録したコンテナに制限され、未指定の場合は全コンテナでの実行を拒否します。コンテナの作成・削除やイメージ操作は全て拒否されます。
 
 ```sh
 docker run ubuntu echo hello  # 403 Forbidden

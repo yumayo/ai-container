@@ -36,8 +36,8 @@ AI Container ──(Unix Socket)──> Go Proxy ──(Docker Socket)──> Do
 
 | エンドポイント | 処理レベル | 内容 |
 |---|---|---|
-| `containers/json` | L7 (HTTP) | コンテナ一覧を許可リストでフィルタリング |
-| `containers/{id}/json` | L7 (HTTP) | コンテナ名/IDを許可リストで検証 |
+| `containers/json` | L7 (HTTP) | 未登録コンテナも含めて一覧をパススルー |
+| `containers/{id}/json` | L7 (HTTP) | `docker compose ps` が利用する詳細情報をパススルー |
 | `containers/{id}/exec` | L7 (HTTP) | コンテナ検証 + JSONボディを解析しCmdを許可リストで検証 |
 | `exec/{id}/start` | L4 (TCP) | HTTP hijackで生TCPパイプ |
 | `_ping`, `version` 等 | L7 (HTTP) | httputil.ReverseProxy でパススルー |
@@ -45,11 +45,12 @@ AI Container ──(Unix Socket)──> Go Proxy ──(Docker Socket)──> Do
 
 ### コンテナアクセス制御
 
-`DOCKER_PROXY_CONTAINERS` 環境変数（改行区切り）で、アクセスを許可するコンテナ名を指定する。`.aicontainer` では `docker-proxy-containers` を1コンテナにつき1行指定する。未指定時は全コンテナへのアクセスを拒否（安全側デフォルト）。
+`DOCKER_PROXY_CONTAINERS` 環境変数（改行区切り）で、コマンド実行を許可するコンテナ名を指定する。`.aicontainer` では `docker-proxy-containers` を1コンテナにつき1行指定する。未指定時は全コンテナでのコマンド実行を拒否する。一覧・詳細の参照は許可リストによらず利用できる。
 
-- `containers/json`: レスポンスをフィルタし、許可コンテナのみ返す
-- `containers/{id}/json`, `containers/{id}/exec`: URLパスからコンテナ名/IDを抽出し、許可リストにない場合は403
+- `containers/json`, `containers/{id}/json`: 未登録コンテナも参照でき、`docker compose ps` に表示される。クエリによるDocker側のフィルタは維持する
+- `containers/{id}/exec`: URLパスからコンテナ名/IDを抽出し、許可リストにない場合は403。実際のコンテナ名を `docker-proxy-containers` に追加するよう日本語で案内する
 - コンテナ名は完全一致のほか、短縮ID（12文字以上のprefix）でもマッチする
+- コマンドの自動転送は、一覧に含まれる登録済みの起動中コンテナだけを対象にする
 
 ### exec/start のストリーム中継
 

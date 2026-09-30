@@ -126,8 +126,9 @@ func newProxy(rules []allowRule, allowedContainers []string, dockerSocket string
 	p.routes = []route{
 		{regexp.MustCompile(`^/` + prefix + `_ping$`), p.passthrough},
 		{regexp.MustCompile(`^/` + prefix + `version$`), p.passthrough},
-		{regexp.MustCompile(`^/` + prefix + `containers/json$`), p.handleContainersList},
-		{regexp.MustCompile(`^/` + prefix + `containers/[a-zA-Z0-9_.-]+/json$`), p.handleContainerAccess},
+		// Compose ps needs both the list and inspect endpoints, including unregistered containers.
+		{regexp.MustCompile(`^/` + prefix + `containers/json$`), p.passthrough},
+		{regexp.MustCompile(`^/` + prefix + `containers/[a-zA-Z0-9_.-]+/json$`), p.passthrough},
 		{regexp.MustCompile(`^/` + prefix + `containers/[a-zA-Z0-9_.-]+/exec$`), p.handleExecCreate},
 		{regexp.MustCompile(`^/` + prefix + `exec/[a-zA-Z0-9]+/start$`), p.handleExecStart},
 		{regexp.MustCompile(`^/` + prefix + `exec/[a-zA-Z0-9]+/json$`), p.passthrough},
@@ -144,9 +145,13 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	writeJSONError(w, http.StatusForbidden, "この操作は許可されていません。コンテナの一覧・詳細の参照と、許可されたコマンドの実行のみ利用できます。")
+}
+
+func writeJSONError(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusForbidden)
-	fmt.Fprint(w, `{"message":"Forbidden: only exec operations are allowed"}`)
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]string{"message": message})
 }
 
 func (p *proxy) dialDocker() (net.Conn, error) {
@@ -171,17 +176,13 @@ func (p *proxy) passthrough(w http.ResponseWriter, r *http.Request) {
 	p.reverseProxy().ServeHTTP(w, r)
 }
 
-// isContainerAllowed checks if the given container name/ID is in the allowed list.
-// If no allowed list is configured, all containers are denied.
-// If nameOrID looks like a container ID (hex, >=12 chars), it resolves the name via Docker API.
-func (p *proxy) isContainerAllowed(nameOrID string) bool {
-	if len(p.allowedContainers) == 0 {
-		return false
-	}
+// containerAccess returns the resolved name and whether execution is allowed.
+// Resolve IDs even with an empty allow list so errors can suggest the actual name.
+func (p *proxy) containerAccess(nameOrID string) (string, bool) {
 	// Direct match by name
 	for _, allowed := range p.allowedContainers {
 		if nameOrID == allowed {
-			return true
+			return nameOrID, true
 		}
 	}
 	// If it looks like a container ID, resolve to name via Docker API
@@ -189,12 +190,13 @@ func (p *proxy) isContainerAllowed(nameOrID string) bool {
 		if name := p.resolveContainerName(nameOrID); name != "" {
 			for _, allowed := range p.allowedContainers {
 				if name == allowed {
-					return true
+					return name, true
 				}
 			}
+			return name, false
 		}
 	}
-	return false
+	return nameOrID, false
 }
 
 func isHexString(s string) bool {
@@ -242,100 +244,21 @@ func (p *proxy) extractContainerName(path string) string {
 	return ""
 }
 
-func (p *proxy) handleContainerAccess(w http.ResponseWriter, r *http.Request) {
-	name := p.extractContainerName(r.URL.Path)
-	if name != "" && !p.isContainerAllowed(name) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusForbidden)
-		msg, _ := json.Marshal(map[string]string{"message": fmt.Sprintf("Forbidden: access to container %q is not allowed", name)})
-		w.Write(msg)
-		return
-	}
-	p.reverseProxy().ServeHTTP(w, r)
-}
-
-func (p *proxy) handleContainersList(w http.ResponseWriter, r *http.Request) {
-	if len(p.allowedContainers) == 0 {
-		// No containers configured: return empty list
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, `[]`)
-		return
-	}
-
-	// Forward to Docker, then filter the response
-	proxy := p.reverseProxy()
-	proxy.ModifyResponse = func(resp *http.Response) error {
-		if resp.StatusCode != http.StatusOK {
-			return nil
-		}
-		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			return err
-		}
-
-		var containers []map[string]interface{}
-		if err := json.Unmarshal(body, &containers); err != nil {
-			// Can't parse: fail closed with empty list
-			resp.Body = io.NopCloser(strings.NewReader("[]"))
-			resp.ContentLength = 2
-			resp.Header.Set("Content-Length", "2")
-			return nil
-		}
-
-		filtered := make([]map[string]interface{}, 0)
-		for _, c := range containers {
-			if p.isContainerVisible(c) {
-				filtered = append(filtered, c)
-			}
-		}
-
-		newBody, _ := json.Marshal(filtered)
-		resp.Body = io.NopCloser(strings.NewReader(string(newBody)))
-		resp.ContentLength = int64(len(newBody))
-		resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(newBody)))
-		return nil
-	}
-	proxy.ServeHTTP(w, r)
-}
-
-// isContainerVisible checks if a container from /containers/json should be visible.
-// Uses exact name match only to prevent unintended matches.
-func (p *proxy) isContainerVisible(container map[string]interface{}) bool {
-	// Check by Names (Docker returns names with "/" prefix)
-	if names, ok := container["Names"].([]interface{}); ok {
-		for _, n := range names {
-			name, ok := n.(string)
-			if !ok {
-				continue
-			}
-			name = strings.TrimPrefix(name, "/")
-			for _, allowed := range p.allowedContainers {
-				if name == allowed {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}
-
 func (p *proxy) handleExecCreate(w http.ResponseWriter, r *http.Request) {
 	// Check container access
-	name := p.extractContainerName(r.URL.Path)
-	if name != "" && !p.isContainerAllowed(name) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusForbidden)
-		msg, _ := json.Marshal(map[string]string{"message": fmt.Sprintf("Forbidden: exec into container %q is not allowed", name)})
-		w.Write(msg)
+	nameOrID := p.extractContainerName(r.URL.Path)
+	name, containerAllowed := p.containerAccess(nameOrID)
+	if !containerAllowed {
+		guidance := fmt.Sprintf(".aicontainer に docker-proxy-containers=%s を追加し、aicontainer を起動し直してください。", name)
+		if isHexString(name) && len(name) >= 12 {
+			guidance = ".aicontainer の docker-proxy-containers に対象コンテナの実際の名前を追加し、aicontainer を起動し直してください。"
+		}
+		writeJSONError(w, http.StatusForbidden, fmt.Sprintf("コンテナ %q でのコマンド実行は許可されていません。%s", name, guidance))
 		return
 	}
 
 	if len(p.allowRules) == 0 {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusForbidden)
-		fmt.Fprint(w, `{"message":"Forbidden: no commands are allowed (docker-proxy-allow is not configured)"}`)
+		writeJSONError(w, http.StatusForbidden, "実行できるコマンドが設定されていません。.aicontainer の docker-proxy-allow に許可するコマンドを追加し、aicontainer を起動し直してください。")
 		return
 	}
 
@@ -381,10 +304,7 @@ func (p *proxy) handleExecCreate(w http.ResponseWriter, r *http.Request) {
 		for _, rule := range p.allowRules {
 			ruleStrs = append(ruleStrs, strings.Join(rule, " "))
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusForbidden)
-		msg := fmt.Sprintf(`{"message":"Forbidden: command \"%s\" is not allowed. Allowed commands: %s"}`, cmdStr, strings.Join(ruleStrs, ", "))
-		fmt.Fprint(w, msg)
+		writeJSONError(w, http.StatusForbidden, fmt.Sprintf("コマンド %q は許可されていません。.aicontainer の docker-proxy-allow を確認してください。許可されたコマンド: %s", cmdStr, strings.Join(ruleStrs, ", ")))
 		return
 	}
 
@@ -490,7 +410,7 @@ func main() {
 			log.Printf("  container[%d]: %s", i, c)
 		}
 	} else {
-		log.Printf("No allowed containers configured (all container access denied)")
+		log.Printf("No allowed containers configured (command execution denied for all containers)")
 	}
 
 	// Remove stale socket
