@@ -99,12 +99,47 @@ sys.exit(17)
 
     def test_missing_prompt_prevents_launch_without_instructions(self):
         self.prompt.unlink()
+        self.assert_prompt_error()
+
+    def test_directory_instead_of_prompt_prevents_launch(self):
+        self.prompt.unlink()
+        self.prompt.mkdir()
+        self.assert_prompt_error()
+
+    @unittest.skipIf(os.geteuid() == 0, "rootはファイルの読み取り権限を迂回するため")
+    def test_unreadable_prompt_prevents_launch(self):
+        self.prompt.chmod(0o000)
+        self.addCleanup(self.prompt.chmod, 0o644)
+        self.assert_prompt_error()
+
+    @unittest.skipIf(os.geteuid() == 0, "rootはディレクトリの通過権限を迂回するため")
+    def test_parent_directory_requires_search_permission(self):
+        directory = self.root / "prompt directory"
+        directory.mkdir()
+        target = directory / "system-prompt.md"
+        self.prompt.rename(target)
+        self.prompt.symlink_to(target)
+        # ファイル自体が0644でも、親が0644ではCLIユーザーから読み取れない。
+        target.chmod(0o644)
+        directory.chmod(0o644)
+        self.addCleanup(directory.chmod, 0o755)
+        self.assert_prompt_error()
+        directory.chmod(0o755)
+        for tool in ("claude", "codex"):
+            with self.subTest(tool=tool):
+                result = self.run_cli(tool)
+                self.assertEqual(result.returncode, 17, result.stderr)
+
+    def assert_prompt_error(self):
         for tool in ("claude", "codex"):
             with self.subTest(tool=tool):
                 result = self.run_cli(tool)
                 self.assertEqual(result.returncode, 1)
                 self.assertEqual(result.stdout, "")
                 self.assertIn("共通システムプロンプトを読み込めません", result.stderr)
+                self.assertIn(str(self.prompt), result.stderr)
+                self.assertIn("bash install.sh main", result.stderr)
+                self.assertIn(".aimount", result.stderr)
 
 
 if __name__ == "__main__":

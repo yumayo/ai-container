@@ -5,8 +5,12 @@ set -euo pipefail
 prompt_file=/etc/aicontainer/system-prompt.md
 tool="${0##*/}"
 
-if [[ ! -r "$prompt_file" ]]; then
+if [[ ! -f "$prompt_file" || ! -r "$prompt_file" ]]; then
     printf 'aicontainer: 共通システムプロンプトを読み込めません: %s\n' "$prompt_file" >&2
+    # ファイルの欠落だけでなく、親ディレクトリの通過権限不足も確認できるようにする。
+    ls -ld -- "${prompt_file%/*}" "$prompt_file" >&2 || true
+    printf 'aicontainer: ホスト側で bash install.sh main を実行し、AIコンテナを起動し直してください。\n' >&2
+    printf 'aicontainer: .aimount で上書きしている場合は、マウント元のファイルと親ディレクトリの権限も確認してください。\n' >&2
     exit 1
 fi
 

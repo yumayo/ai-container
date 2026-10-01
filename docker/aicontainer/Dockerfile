@@ -20,10 +20,14 @@ RUN echo 'export PATH="$HOME/.nvm/versions/node/$(node --version)/bin:$PATH"' >>
 COPY --from=dp-builder /dp /usr/local/bin/dp
 
 # 共通指示を各CLIのシステム／開発者指示として渡す。セッションの設定は書き換えない。
-COPY --chmod=0644 ./system-prompt.md /etc/aicontainer/system-prompt.md
+COPY ./system-prompt.md /tmp/aicontainer-system-prompt.md
 COPY --chmod=0755 ./ai-cli /usr/local/lib/aicontainer/ai-cli
 USER root
-RUN mkdir -p /usr/local/lib/aicontainer/bin /opt/aicontainer/bin && \
+# COPYによる親ディレクトリの暗黙作成に頼らず、ubuntuが通過・読み取りできる権限で配置する。
+RUN install -d -m 0755 /etc/aicontainer && \
+    install -m 0644 /tmp/aicontainer-system-prompt.md /etc/aicontainer/system-prompt.md && \
+    rm /tmp/aicontainer-system-prompt.md && \
+    mkdir -p /usr/local/lib/aicontainer/bin /opt/aicontainer/bin && \
     ln -s /home/ubuntu/.local/bin/claude /usr/local/lib/aicontainer/bin/claude && \
     bash -c 'export NVM_DIR=/home/ubuntu/.nvm; source "$NVM_DIR/nvm.sh" && \
       ln -s "$(command -v codex)" /usr/local/lib/aicontainer/bin/codex && \
@@ -31,6 +35,8 @@ RUN mkdir -p /usr/local/lib/aicontainer/bin /opt/aicontainer/bin && \
     ln -s /usr/local/lib/aicontainer/ai-cli /opt/aicontainer/bin/claude && \
     ln -s /usr/local/lib/aicontainer/ai-cli /opt/aicontainer/bin/codex
 USER ubuntu
+# rootでは見逃すアクセス権の問題を、CLIと同じユーザーでビルド時に検出する。
+RUN test -f /etc/aicontainer/system-prompt.md && cat /etc/aicontainer/system-prompt.md > /dev/null
 ENV PATH="/opt/aicontainer/bin:${PATH}"
 # nvmや~/.local/binのPATH設定後も、対話Bashでは必ずラッパーを選ぶ。
 RUN echo 'export PATH="/opt/aicontainer/bin:$PATH"' >> /home/ubuntu/.bashrc
