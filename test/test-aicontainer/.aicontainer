@@ -1,2 +1,2 @@
-network=test
+append-network=test
 session=../../

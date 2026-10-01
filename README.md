@@ -69,7 +69,7 @@ node_modules
 ### `.aicontainer` — コンテナ動作設定
 
 ```
-network=myproject                      # 参加するDockerネットワーク名（未指定時は専用ネットワーク）
+append-network=myproject               # 追加で参加するDockerネットワーク名（複数行指定可）
 allow-dns=mcp-server                   # 追加で通信を許可するコンテナ名・ドメイン名（複数行指定可）
 session=../                            # セッション共有パス（複数プロジェクトで共有可能）
 image=yumayo-ai-custom                 # 使用するDockerイメージ（デフォルト: yumayo-ai）
@@ -84,17 +84,19 @@ docker-proxy-containers=myapp         # execを許可するコンテナ名（複
 docker-proxy-containers=mydb
 ```
 
-`network` 未指定時は、起動ごとに `yumayo-ai-<ランダム値>` という専用のbridgeネットワークを作成します。専用ネットワークではコンテナ間通信を無効化し、AIコンテナ終了時にネットワークも削除します。
+AIコンテナは常に、外部通信用の専用bridgeネットワーク（`public_network`）に参加します。Docker上の名前は起動ごとに `yumayo-ai-<小文字英数字のランダム値>` として生成し、コンテナ間通信を無効化します。AIコンテナ終了時にこの専用ネットワークも削除します。
 
-`network` を指定した場合は、その名前のDockerネットワークに参加します。存在しなければbridgeネットワークを作成し、終了後も残します。MCPサーバーなどとネットワークを共有する場合に使用してください。共有ネットワークでも、通信先はAPI・認証先と `allow-dns` に指定した名前から解決したIPだけに制限します。
+`append-network` を指定した場合は、専用ネットワークに加えて、その名前のDockerネットワークにも参加します。存在しなければbridgeネットワークを作成し、追加ネットワークは終了後も残します。MCPサーバーなどとネットワークを共有する場合に使用してください。同じキーを複数行書くと複数のネットワークに参加でき、重複した名前と空の定義は無視します。追加ネットワークでも、通信先はAPI・認証先と `allow-dns` に指定した名前から解決したIPだけに制限します。
+
+追加ネットワークはコンテナ起動時から接続し、外部APIへのデフォルト経路には専用ネットワークを使います。`append-network` を使う場合は、ゲートウェイ優先度（`gw-priority`）に対応する Docker Engine / CLI 28.0以降が必要です。
 
 `aicontainer dump` の出力にも同じネットワーク準備・後始末を含みます。Ollamaモード（`aicontainer ollama` / `tool=claude-ollama`）は廃止済みで、指定すると起動前にエラーになります。
 
 `docker-proxy-allow` と `docker-proxy-containers` は同じキーを複数行書いて指定します。未指定時はそれぞれ全コマンド・全コンテナを拒否します。従来のカンマ区切りの設定は、1項目につき1行へ書き換えてください。空の定義は無視します。
 
-旧設定名 `dns` は `allow-dns` に変更しました。既存の `.aicontainer` は設定名を書き換えてください。
+旧設定名 `network` は `append-network` に、`dns` は `allow-dns` に変更しました。旧設定名が残っている場合は起動時にエラーになります。既存の `.aicontainer` は設定名を書き換えてください。
 
-`allow-dns` には、追加で接続を許可するコンテナ名・ネットワークエイリアス・外部ドメイン名を1行に1つ指定できます。コンテナ名やエイリアスを使う場合は、`network` に同じDockerネットワークを指定してください。
+`allow-dns` には、追加で接続を許可するコンテナ名・ネットワークエイリアス・外部ドメイン名を1行に1つ指定できます。コンテナ名やエイリアスを使う場合は、`append-network` に同じDockerネットワークを指定してください。
 
 ```
 allow-dns=api.example.org
@@ -109,13 +111,13 @@ API・認証先と `allow-dns` に指定した接続先以外のIPは許可し�
 HTTPで接続するMCPサーバーが `myproject` ネットワーク上で `mcp-server` という名前で動作する場合、`.aicontainer` に次を指定します。
 
 ```ini
-network=myproject
+append-network=myproject
 allow-dns=mcp-server
 ```
 
 AIツール側のMCP接続URLは、サーバーの設定に合わせて、例えば `http://mcp-server:3000/mcp` とします。MCPサーバーはコンテナ内で `0.0.0.0` に待ち受けさせてください。同じネットワーク経由で接続するため、ホストへのポート公開は不要です。`allow-dns` は接続許可の設定であり、AIツールへのMCP登録は別途必要です。
 
-ネットワークはコンテナ間通信と外部APIへの通信が可能なものを使用してください。`network` の指定だけではMCPへの通信は許可されず、`allow-dns` に指定したサーバーのIPへの通信を許可します。許可はIP単位で、DNSを除く全ポートが対象です。
+追加ネットワークはコンテナ間通信が可能なものを使用してください。外部APIへの通信は専用ネットワークを使うため、追加先には内部ネットワーク（`--internal`）も指定できます。`append-network` の指定だけではMCPへの通信は許可されず、`allow-dns` に指定したサーバーのIPへの通信を許可します。許可はIP単位で、DNSを除く全ポートが対象です。
 
 ### `.aimount` — 追加マウント
 
@@ -251,7 +253,7 @@ Goプロキシのテストは `cd docker/docker-proxy && go test main.go main_te
 
 ## セキュリティ
 
-AIコンテナは既定で専用ネットワークを使い、`network` を指定した場合だけ他コンテナとネットワークを共有します。接続先はどちらの場合もコンテナ内のファイアウォールで制限します。外部コンテナのコマンド実行はDocker Socket Proxyを経由し、HTTPのMCPサーバーには `allow-dns` で許可して直接接続します。
+AIコンテナは常に外部通信用の専用ネットワークを使い、`append-network` を指定した場合は他コンテナのネットワークにも追加で参加します。すべてのネットワークで接続先をコンテナ内のファイアウォールにより制限します。外部コンテナのコマンド実行はDocker Socket Proxyを経由し、HTTPのMCPサーバーには `allow-dns` で許可して直接接続します。
 
 接続先は、モード別のAnthropic／OpenAIのAPI・認証先と、`.aicontainer` の `allow-dns` に指定した名前から解決したIPv4アドレスに限定しています。登録済みIPへの送信とその応答は、DNS（UDP/TCP 53番）を除き全ポートで許可します。localhost、自分自身のIP、未登録のIP、IPv6通信は拒否します。
 

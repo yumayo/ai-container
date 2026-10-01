@@ -17,6 +17,7 @@ import unittest
 SCRIPT = Path(__file__).resolve().parents[1] / "docker/aicontainer/init-firewall.sh"
 ANSWERS = {
     "api.anthropic.com": ["203.0.113.10", "203.0.113.11"],
+    "platform.claude.com": ["203.0.113.12"],
     "api.openai.com": ["203.0.113.20", "203.0.113.21"],
     "chatgpt.com": ["203.0.113.20"],
     "auth0.openai.com": ["203.0.113.22"],
@@ -145,8 +146,8 @@ class FirewallTest(unittest.TestCase):
         return self.state()
 
     def test_required_names_are_saved_before_firewall_changes_in_both_modes(self):
-        for mode, domains in (("claude", ["api.anthropic.com"]),
-                              ("codex", list(ANSWERS)[1:5])):
+        for mode, domains in (("claude", ["api.anthropic.com", "platform.claude.com"]),
+                              ("codex", ["api.openai.com", "chatgpt.com", "auth0.openai.com", "auth.openai.com"])):
             with self.subTest(mode=mode):
                 self.hosts.write_text(self.original_hosts)
                 inode = self.hosts.stat().st_ino

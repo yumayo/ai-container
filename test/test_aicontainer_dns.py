@@ -30,21 +30,23 @@ root = Path(os.environ["DNS_CONFIG_TEST_DIR"])
 args = sys.argv[1:]
 with (root / "docker-events.jsonl").open("a") as events:
     events.write(json.dumps(args) + "\\n")
+network_state = root / "networks.json"
+networks = json.loads(network_state.read_text()) if network_state.exists() else []
 if args[:2] == ["network", "create"]:
-    if (os.environ.get("TEST_NETWORK_CREATE_FAIL") or
+    failure = os.environ.get("TEST_NETWORK_CREATE_FAIL")
+    if (failure in ("1", args[-1]) or
             args[-1] == os.environ.get("TEST_EXISTING_NETWORK") or
-            (root / "active-network").exists()):
+            args[-1] in networks):
         sys.exit(1)
-    (root / "active-network").write_text(args[-1])
+    networks.append(args[-1])
+    network_state.write_text(json.dumps(networks))
     sys.exit(0)
 if args[:2] == ["network", "inspect"]:
-    exists = (args[-1] == os.environ.get("TEST_EXISTING_NETWORK") or
-              ((root / "active-network").exists() and
-               (root / "active-network").read_text() == args[-1]))
+    exists = args[-1] == os.environ.get("TEST_EXISTING_NETWORK") or args[-1] in networks
     sys.exit(0 if exists else 1)
 if args[:2] == ["network", "rm"]:
-    assert (root / "active-network").read_text() == args[-1]
-    (root / "active-network").unlink()
+    networks.remove(args[-1])
+    network_state.write_text(json.dumps(networks))
     sys.exit(0)
 if args[0] == "inspect":
     print(os.environ.get("TEST_PROXY_NETWORK", "bridge"))
@@ -62,9 +64,18 @@ record = {"args": args}
 if args[:2] == ["run", "-d"]:
     (root / "proxy-calls.json").write_text(json.dumps(record))
     sys.exit(0)
-network = args[args.index("--network") + 1]
-assert (network == os.environ.get("TEST_EXISTING_NETWORK") or
-        network == (root / "active-network").read_text())
+attached_networks = []
+for index, arg in enumerate(args):
+    if arg == "--network":
+        network = args[index + 1]
+        if network.startswith("name="):
+            network = network.split(",")[0].removeprefix("name=")
+            # 実際のDocker CLIは、name=...形式の名前を小文字に変換してAPIへ渡す。
+            network = network.lower()
+        assert network == os.environ.get("TEST_EXISTING_NETWORK") or network in networks
+        assert network not in attached_networks
+        attached_networks.append(network)
+record["networks"] = attached_networks
 for option in args:
     if "target=/etc/aicontainer/dns" in option:
         fields = dict(part.split("=", 1) for part in option.split(",") if "=" in part)
@@ -93,34 +104,43 @@ sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
 
     def assert_dedicated_network_lifecycle(self, name):
         events = self.docker_events()
-        creates = [event for event in events if event[:2] == ["network", "create"]]
+        creates = [event for event in events if event[:2] == ["network", "create"] and event[-1] == name]
         self.assertEqual(len(creates), 1)
         create = creates[0]
         self.assertEqual(create[-1], name)
         self.assertEqual(create[create.index("--driver") + 1], "bridge")
         self.assertIn("com.docker.network.bridge.enable_icc=false", create)
         self.assertNotIn("--internal", create)  # 外部APIへの経路は維持する。
-        run = next(event for event in events if event[:2] == ["run", "-ti"])
+        run = next(event for event in events if event[:2] == ["run", "-ti"] and
+                   (name in event or f"name={name},gw-priority=1" in event))
         remove = ["network", "rm", name]
         self.assertLess(events.index(create), events.index(run))
         self.assertLess(events.index(run), events.index(remove))
-        self.assertFalse((self.root / "active-network").exists())
+        self.assertNotIn(name, json.loads((self.root / "networks.json").read_text()))
+
+    def assert_attached_networks(self, record, *appended):
+        public_network = record["networks"][0]
+        self.assertRegex(public_network, r"^yumayo-ai-[a-z0-9]{10}$")
+        self.assertEqual(record["networks"][1:], list(appended))
+        if appended:
+            self.assertIn(f"name={public_network},gw-priority=1", record["args"])
+        self.assert_dedicated_network_lifecycle(public_network)
 
     def assert_shared_network_usage(self, name, created=False):
         events = self.docker_events()
         self.assertIn(["network", "inspect", name], events)
-        self.assertFalse(any(event[:2] == ["network", "rm"] for event in events))
-        creates = [event for event in events if event[:2] == ["network", "create"]]
+        self.assertNotIn(["network", "rm", name], events)
+        creates = [event for event in events if event[:2] == ["network", "create"] and event[-1] == name]
         if created:
             self.assertEqual(len(creates), 1)
             self.assertEqual(creates[0][-1], name)
             self.assertNotIn("com.docker.network.bridge.enable_icc=false", creates[0])
-            self.assertEqual((self.root / "active-network").read_text(), name)
+            self.assertIn(name, json.loads((self.root / "networks.json").read_text()))
         else:
             self.assertEqual(creates, [])
 
     def test_repeated_allow_dns_settings_are_passed_in_a_readonly_snapshot(self):
-        self.config.write_text("network=project\nallow-dns=postgres\nallow-dns='web_api'\nallow-dns=service.local   \n")
+        self.config.write_text("append-network=project\nallow-dns=postgres\nallow-dns='web_api'\nallow-dns=service.local   \n")
         self.env["DNS_CONFIG_TEST_MUTATE"] = "1"
         self.env["TEST_EXISTING_NETWORK"] = "project"
         result = self.run_launcher("codex")
@@ -129,7 +149,7 @@ sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
         self.assertEqual(record["names"], ["postgres", "web_api", "service.local"])
         self.assertEqual(record["names_after_edit"], record["names"])
         self.assertTrue(record["readonly"])
-        self.assertEqual(record["args"][record["args"].index("--network") + 1], "project")
+        self.assert_attached_networks(record, "project")
         self.assertIn("FIREWALL_MODE=codex", record["args"])
         self.assertFalse(Path(record["snapshot"]).exists())
         self.assertFalse(Path(record["snapshot"]).parent.exists())
@@ -171,24 +191,48 @@ sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
         record = json.loads(self.calls.read_text())
         self.assertNotIn("snapshot", record)
         network = record["args"][record["args"].index("--network") + 1]
-        self.assertRegex(network, r"^yumayo-ai-[A-Za-z0-9]{10}$")
+        self.assertRegex(network, r"^yumayo-ai-[a-z0-9]{10}$")
         self.assert_dedicated_network_lifecycle(network)
 
+    def test_generated_network_name_survives_docker_cli_lowercasing(self):
+        mock = self.root / "mktemp"
+        mock.write_text(f"#!{sys.executable}\n" + '''
+import os
+from pathlib import Path
+directory = Path(os.environ["DNS_CONFIG_TEST_DIR"]) / "aicontainer.AbCd0123Ef"
+directory.mkdir()
+print(directory)
+''')
+        mock.chmod(0o755)
+        for config in ("", "append-network=project\n"):
+            with self.subTest(config=config):
+                self.config.write_text(config)
+                result = self.run_launcher()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                record = json.loads(self.calls.read_text())
+                self.assertEqual(record["networks"][0], "yumayo-ai-abcd0123ef")
+                creates = [event for event in self.docker_events()
+                           if event[:2] == ["network", "create"]]
+                self.assertTrue(all(event[-1] == event[-1].lower() for event in creates))
+                self.assertNotIn("yumayo-ai-abcd0123ef",
+                                 json.loads((self.root / "networks.json").read_text()))
+                self.assertFalse((self.root / "aicontainer.AbCd0123Ef").exists())
+
     def test_configured_network_is_created_and_preserved_with_the_exact_name(self):
-        self.config.write_text("network=project\n")
+        self.config.write_text("append-network=project\n")
         result = self.run_launcher()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        args = json.loads(self.calls.read_text())["args"]
-        self.assertEqual(args[args.index("--network") + 1], "project")
+        record = json.loads(self.calls.read_text())
+        self.assert_attached_networks(record, "project")
         self.assert_shared_network_usage("project", created=True)
 
     def test_existing_mcp_network_is_joined_and_preserved_while_proxy_has_no_network(self):
-        self.config.write_text("network=project\nallow-dns=mcp-server\ndocker-proxy-name=project\n")
+        self.config.write_text("append-network=project\nallow-dns=mcp-server\ndocker-proxy-name=project\n")
         self.env["TEST_EXISTING_NETWORK"] = "project"
         result = self.run_launcher()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         record = json.loads(self.calls.read_text())
-        self.assertEqual(record["args"][record["args"].index("--network") + 1], "project")
+        self.assert_attached_networks(record, "project")
         self.assertEqual(record["names"], ["mcp-server"])
         self.assertTrue(record["readonly"])
         self.assertFalse(Path(record["snapshot"]).parent.exists())
@@ -197,17 +241,18 @@ sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
         self.assertEqual(proxy_args[proxy_args.index("--network") + 1], "none")
 
     def test_shared_network_is_preserved_if_ai_container_fails(self):
-        self.config.write_text("network=project\nallow-dns=mcp-server\n")
+        self.config.write_text("append-network=project\nallow-dns=mcp-server\n")
         self.env.update(TEST_EXISTING_NETWORK="project", DNS_CONFIG_TEST_EXIT="7")
         result = self.run_launcher("codex")
         self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
         self.assert_shared_network_usage("project")
         record = json.loads(self.calls.read_text())
+        self.assert_attached_networks(record, "project")
         self.assertFalse(Path(record["snapshot"]).parent.exists())
 
     def test_network_creation_failure_prevents_ai_start_and_network_removal(self):
         self.env["TEST_NETWORK_CREATE_FAIL"] = "1"
-        for config in ("", "network=project\n"):
+        for config in ("", "append-network=project\n"):
             with self.subTest(config=config):
                 self.config.write_text(config)
                 result = self.run_launcher()
@@ -215,15 +260,56 @@ sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
                 self.assertFalse(self.calls.exists())
                 self.assertFalse(any(event[:2] == ["network", "rm"] for event in self.docker_events()))
 
+    def test_append_network_creation_failure_cleans_up_only_the_public_network(self):
+        self.config.write_text("append-network=project\nappend-network=unavailable\nallow-dns=mcp-server\n")
+        self.env["TEST_NETWORK_CREATE_FAIL"] = "unavailable"
+        result = self.run_launcher()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.calls.exists())
+        events = self.docker_events()
+        public_network = events[0][-1]
+        self.assertRegex(public_network, r"^yumayo-ai-[a-z0-9]{10}$")
+        self.assertIn(["network", "rm", public_network], events)
+        self.assertEqual(json.loads((self.root / "networks.json").read_text()), ["project"])
+
     def test_reserved_and_invalid_network_names_are_rejected(self):
         for name in ("host", "none", "bridge", "container:other", "project --network host",
-                     "$(touch injected)", "`touch injected`"):
+                     "project,other", "name=project,gw-priority=2", "$(touch injected)", "`touch injected`"):
             with self.subTest(name=name):
-                self.config.write_text(f"network={name}\n")
+                self.config.write_text(f"append-network={name}\n")
                 result = self.run_launcher("dump")
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse((self.root / "injected").exists())
                 self.assertFalse((self.root / "docker-events.jsonl").exists())
+
+    def test_legacy_network_setting_reports_migration_before_start(self):
+        self.config.write_text("network=project\n")
+        result = self.run_launcher()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("network は append-network に変更されました", result.stderr)
+        self.assertFalse((self.root / "docker-events.jsonl").exists())
+
+    def test_multiple_append_networks_are_attached_once_and_preserved(self):
+        self.config.write_text("append-network=project\r\nappend-network='other'   \r\n"
+                               "append-network=project\r\nappend-network=   \r\n")
+        result = self.run_launcher()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        record = json.loads(self.calls.read_text())
+        self.assert_attached_networks(record, "project", "other")
+        self.assert_shared_network_usage("project", created=True)
+        self.assert_shared_network_usage("other", created=True)
+
+    def test_append_network_settings_are_reset_between_launches_in_the_same_shell(self):
+        self.config.write_text("append-network=project\n")
+        result = subprocess.run(["bash", "-c",
+                                 'source "$1"; aicontainer || exit; '
+                                 'printf "%s" "" > .aicontainer; aicontainer',
+                                 "test", str(LAUNCHER)], cwd=self.root, env=self.env,
+                                text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        record = json.loads(self.calls.read_text())
+        self.assertEqual(len(record["networks"]), 1)
+        self.assertNotIn("project", record["networks"])
 
     def test_failed_hook_creates_no_network(self):
         self.config.write_text("before-start-up=false\n")
@@ -243,11 +329,11 @@ sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
             self.assertEqual(execution.returncode, 0, execution.stdout + execution.stderr)
             args = json.loads(self.calls.read_text())["args"]
             networks.append(args[args.index("--network") + 1])
-            self.assertFalse((self.root / "active-network").exists())
+            self.assertEqual(json.loads((self.root / "networks.json").read_text()), [])
         self.assertNotEqual(*networks)
 
     def test_dump_creates_a_shared_network_once_and_reuses_it(self):
-        self.config.write_text("network=project\nallow-dns=mcp-server\n")
+        self.config.write_text("append-network=project\nallow-dns=mcp-server\n")
         result = self.run_launcher("dump", "codex")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse((self.root / "docker-events.jsonl").exists())
@@ -257,7 +343,7 @@ sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
                                        text=True, capture_output=True)
             self.assertEqual(execution.returncode, 0, execution.stdout + execution.stderr)
             record = json.loads(self.calls.read_text())
-            self.assertEqual(record["args"][record["args"].index("--network") + 1], "project")
+            self.assert_attached_networks(record, "project")
             self.assertEqual(record["names"], ["mcp-server"])
             self.assertFalse(Path(record["snapshot"]).parent.exists())
         self.assert_shared_network_usage("project", created=True)
@@ -265,7 +351,7 @@ sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
     def test_ollama_mode_remains_disabled(self):
         for args in (("ollama", "model"), ("dump", "ollama", "model"), ()):
             with self.subTest(args=args):
-                self.config.write_text("network=project\ntool=claude-ollama\nmodel=model\n")
+                self.config.write_text("append-network=project\ntool=claude-ollama\nmodel=model\n")
                 result = self.run_launcher(*args)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("Ollama mode is no longer supported", result.stderr)
