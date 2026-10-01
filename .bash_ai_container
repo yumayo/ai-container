@@ -221,6 +221,35 @@ __aicontainer_parse_config() {
   done < "$config_file"
 }
 
+# dumpしたスクリプトにも埋め込むため、他のヘルパーに依存させない。
+__aicontainer_check_network_support() {
+  local versions client_version server_version api_version version
+  if ! versions=$(docker version --format '{{.Client.Version}}|{{.Server.Version}}|{{.Client.APIVersion}}' 2>/dev/null); then
+    printf '%s\n' 'エラー: Docker のバージョンを取得できませんでした。Docker CLI のインストール、Docker Engine の起動状態と接続先を docker version で確認してください。' >&2
+    return 1
+  fi
+  IFS='|' read -r client_version server_version api_version <<< "$versions"
+  for version in "$client_version" "$server_version"; do
+    if [[ ! "$version" =~ ^([0-9]+)\.[0-9]+\.[0-9]+([+-].*)?$ ]]; then
+      printf 'エラー: Docker のバージョンを判定できません（CLI %s / Engine %s）。docker version の結果を確認してください。\n' "$client_version" "$server_version" >&2
+      return 1
+    fi
+    if (( 10#${BASH_REMATCH[1]} < 28 )); then
+      printf 'エラー: append-network には Docker CLI と Docker Engine の両方が 28.0 以降である必要があります（現在: CLI %s / Engine %s）。Docker を更新してください。\n' "$client_version" "$server_version" >&2
+      return 1
+    fi
+  done
+  # DOCKER_API_VERSIONなどにより、新しいDockerでも古いAPIを使う場合がある。
+  if [[ ! "$api_version" =~ ^([0-9]+)\.([0-9]+)$ ]]; then
+    printf 'エラー: Docker API のバージョンを判定できません（%s）。docker version の結果を確認してください。\n' "$api_version" >&2
+    return 1
+  fi
+  if (( 10#${BASH_REMATCH[1]} < 1 || (10#${BASH_REMATCH[1]} == 1 && 10#${BASH_REMATCH[2]} < 48) )); then
+    printf 'エラー: append-network には Docker API 1.48 以降が必要です（現在: %s）。DOCKER_API_VERSION の指定と Docker の接続先を確認してください。\n' "$api_version" >&2
+    return 1
+  fi
+}
+
 __aicontainer_start_proxy() {
   local proxy_allow="${1:-}"
   local proxy_name="yumayo-ai-proxy-${2}"
@@ -440,6 +469,17 @@ aicontainer() {
     done < .env
   fi
 
+  # .envの接続先・API設定を反映し、プロキシやネットワークの作成前に検証する。
+  local network_version_check=""
+  if [ ${#AICONTAINER_APPEND_NETWORKS[@]} -gt 0 ]; then
+    if [ "$dump_mode" = true ]; then
+      network_version_check="$(declare -f __aicontainer_check_network_support)
+    __aicontainer_check_network_support || exit 1"
+    else
+      __aicontainer_check_network_support || return 1
+    fi
+  fi
+
   AI_IGNORE=""
   declare -A AI_IGNORE_PATHS
 
@@ -649,6 +689,7 @@ aicontainer() {
   # 追加ネットワーク上の接続先もallow-dns設定とコンテナ内ファイアウォールで制限する。
   # dumpにも同じ準備・後始末を含める。追加ネットワークは削除しない。
   docker_cmd="(
+    $network_version_check
     aicontainer_runtime_dir=\$(mktemp -d /tmp/aicontainer.XXXXXXXXXX) || exit 1
     aicontainer_public_network=\"yumayo-ai-\${aicontainer_runtime_dir##*.}\"
     # Docker CLIが--network name=...形式の名前を小文字に変換するため、作成時も揃える。

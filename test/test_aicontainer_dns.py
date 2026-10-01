@@ -30,6 +30,13 @@ root = Path(os.environ["DNS_CONFIG_TEST_DIR"])
 args = sys.argv[1:]
 with (root / "docker-events.jsonl").open("a") as events:
     events.write(json.dumps(args) + "\\n")
+if args[0] == "version":
+    if os.environ.get("TEST_DOCKER_VERSION_FAIL"):
+        print("Cannot connect to the Docker daemon", file=sys.stderr)
+        sys.exit(1)
+    api = os.environ.get("DOCKER_API_VERSION", "1.48")
+    print(os.environ.get("TEST_DOCKER_VERSION", "28.0.0|28.0.0|" + api))
+    sys.exit(0)
 network_state = root / "networks.json"
 networks = json.loads(network_state.read_text()) if network_state.exists() else []
 if args[:2] == ["network", "create"]:
@@ -93,6 +100,7 @@ sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
         mock.chmod(0o755)
         self.env = dict(os.environ, DNS_CONFIG_TEST_DIR=str(self.root),
                         OPENAI_API_KEY="", PATH=str(self.root) + os.pathsep + os.environ["PATH"])
+        self.env.pop("DOCKER_API_VERSION", None)
 
     def run_launcher(self, *args):
         return subprocess.run(["bash", "-c", 'source "$1"; aicontainer "${@:2}"',
@@ -101,6 +109,87 @@ sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
 
     def docker_events(self):
         return [json.loads(line) for line in (self.root / "docker-events.jsonl").read_text().splitlines()]
+
+    def test_old_docker_versions_fail_before_hook_proxy_or_network_creation(self):
+        self.config.write_text("append-network=project\ndocker-proxy-name=project\n"
+                               "before-start-up=touch hook-ran\n")
+        for versions in ("27.5.1|28.0.0|1.47", "28.0.0|27.5.1|1.47", "27.5.1|27.5.1|1.47"):
+            with self.subTest(versions=versions):
+                self.env["TEST_DOCKER_VERSION"] = versions
+                result = self.run_launcher()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Docker CLI と Docker Engine の両方が 28.0 以降", result.stderr)
+                client, server, _ = versions.split("|")
+                self.assertIn(f"CLI {client} / Engine {server}", result.stderr)
+                self.assertTrue(all(event[0] == "version" for event in self.docker_events()))
+                self.assertFalse((self.root / "hook-ran").exists())
+
+    def test_supported_docker_versions_are_checked_before_creating_resources(self):
+        self.config.write_text("append-network=project\ndocker-proxy-name=project\n")
+        for versions in ("28.0.0|28.0.0|1.48", "29.8.1|28.5.2|1.51", "28.0.1+vendor|28.0.0|1.48"):
+            with self.subTest(versions=versions):
+                self.env["TEST_DOCKER_VERSION"] = versions
+                events_file = self.root / "docker-events.jsonl"
+                if events_file.exists():
+                    events_file.unlink()
+                result = self.run_launcher()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                events = self.docker_events()
+                self.assertEqual(events[0][0], "version")
+                self.assertEqual(sum(event[0] == "version" for event in events), 1)
+                self.assertTrue(self.calls.exists())
+
+    def test_docker_version_lookup_failure_has_a_japanese_error(self):
+        self.config.write_text("append-network=project\n")
+        self.env["TEST_DOCKER_VERSION_FAIL"] = "1"
+        result = self.run_launcher()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Docker のバージョンを取得できませんでした", result.stderr)
+        self.assertNotIn("Cannot connect", result.stderr)
+        self.assertEqual(len(self.docker_events()), 1)
+        self.assertFalse(self.calls.exists())
+
+    def test_unrecognized_docker_versions_have_a_japanese_error(self):
+        self.config.write_text("append-network=project\n")
+        for versions in ("unknown|28.0.0|1.48", "28.0.0||1.48", "28.0.0|28.0.0|unknown"):
+            with self.subTest(versions=versions):
+                self.env["TEST_DOCKER_VERSION"] = versions
+                result = self.run_launcher()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("バージョンを判定できません", result.stderr)
+                self.assertTrue(all(event[0] == "version" for event in self.docker_events()))
+                self.assertFalse(self.calls.exists())
+
+    def test_old_api_version_from_dotenv_is_rejected_before_network_creation(self):
+        self.config.write_text("append-network=project\n")
+        (self.root / ".env").write_text("DOCKER_API_VERSION=1.47\n")
+        result = self.run_launcher()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Docker API 1.48 以降が必要", result.stderr)
+        self.assertIn("現在: 1.47", result.stderr)
+        self.assertIn("DOCKER_API_VERSION", result.stderr)
+        self.assertEqual(len(self.docker_events()), 1)
+        self.assertFalse(self.calls.exists())
+
+    def test_dump_checks_docker_versions_when_the_output_is_executed(self):
+        self.config.write_text("append-network=project\n")
+        self.env["TEST_DOCKER_VERSION"] = "27.5.1|28.0.0|1.47"
+        result = self.run_launcher("dump")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((self.root / "docker-events.jsonl").exists())
+        command = result.stdout[result.stdout.index("(\n"):]
+        execution = subprocess.run(["bash"], input=command, cwd=self.root, env=self.env,
+                                   text=True, capture_output=True)
+        self.assertNotEqual(execution.returncode, 0)
+        self.assertIn("Docker CLI と Docker Engine の両方が 28.0 以降", execution.stderr)
+        self.assertEqual(len(self.docker_events()), 1)
+        self.assertFalse(self.calls.exists())
+
+    def test_without_append_network_docker_28_is_not_required(self):
+        self.env["TEST_DOCKER_VERSION"] = "27.5.1|27.5.1|1.47"
+        result = self.run_launcher()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(any(event[0] == "version" for event in self.docker_events()))
 
     def assert_dedicated_network_lifecycle(self, name):
         events = self.docker_events()
@@ -267,7 +356,7 @@ print(directory)
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.calls.exists())
         events = self.docker_events()
-        public_network = events[0][-1]
+        public_network = next(event[-1] for event in events if event[:2] == ["network", "create"])
         self.assertRegex(public_network, r"^yumayo-ai-[a-z0-9]{10}$")
         self.assertIn(["network", "rm", public_network], events)
         self.assertEqual(json.loads((self.root / "networks.json").read_text()), ["project"])

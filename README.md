@@ -90,6 +90,8 @@ AIコンテナは常に、外部通信用の専用bridgeネットワーク（`pu
 
 追加ネットワークはコンテナ起動時から接続し、外部APIへのデフォルト経路には専用ネットワークを使います。`append-network` を使う場合は、ゲートウェイ優先度（`gw-priority`）に対応する Docker Engine / CLI 28.0以降が必要です。
 
+`append-network` 指定時は、プロキシやネットワークを作成する前にCLI・Engineのバージョンを確認します。28.0未満、バージョンの取得失敗、Docker API 1.48未満の場合は日本語のエラーを表示して起動を中止します。`DOCKER_API_VERSION` で古いAPIに固定している場合は、その指定も見直してください。`aicontainer dump` では出力したスクリプトの実行時に同じ確認を行います。
+
 `aicontainer dump` の出力にも同じネットワーク準備・後始末を含みます。Ollamaモード（`aicontainer ollama` / `tool=claude-ollama`）は廃止済みで、指定すると起動前にエラーになります。
 
 `docker-proxy-allow` と `docker-proxy-containers` は同じキーを複数行書いて指定します。未指定時はそれぞれ全コマンド・全コンテナを拒否します。従来のカンマ区切りの設定は、1項目につき1行へ書き換えてください。空の定義は無視します。
