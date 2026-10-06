@@ -1,4 +1,4 @@
-""".aicontainerのDNS・ネットワーク分離・プロキシ設定を、Dockerを起動せずに検証する。"""
+""".aicontainerのDNS・IP許可・ネットワーク分離・プロキシ設定を、Dockerを起動せずに検証する。"""
 
 import json
 import os
@@ -94,6 +94,16 @@ for option in args:
         if os.environ.get("DNS_CONFIG_TEST_MUTATE"):
             (root / ".aicontainer").write_text("allow-dns=unexpected.example\\n")
             record["names_after_edit"] = snapshot.read_text().splitlines()
+    if "target=/etc/aicontainer/ips" in option:
+        fields = dict(part.split("=", 1) for part in option.split(",") if "=" in part)
+        snapshot = Path(fields["source"])
+        record["ip_snapshot"] = str(snapshot)
+        record["ips"] = snapshot.read_text().splitlines()
+        record["ip_readonly"] = "readonly" in option.split(",")
+        record["ip_mode"] = snapshot.stat().st_mode & 0o777
+        if os.environ.get("DNS_CONFIG_TEST_MUTATE"):
+            (root / ".aicontainer").write_text("allow-ip=0.0.0.0/0\\n")
+            record["ips_after_edit"] = snapshot.read_text().splitlines()
 (root / "docker-calls.json").write_text(json.dumps(record))
 sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
 ''')
@@ -279,9 +289,84 @@ sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         record = json.loads(self.calls.read_text())
         self.assertNotIn("snapshot", record)
+        self.assertNotIn("ip_snapshot", record)
         network = record["args"][record["args"].index("--network") + 1]
         self.assertRegex(network, r"^yumayo-ai-[a-z0-9]{10}$")
         self.assert_dedicated_network_lifecycle(network)
+
+    def test_allow_ip_snapshot_coexists_with_dns_and_is_cleaned_up_on_exit(self):
+        for exit_code in (0, 7):
+            with self.subTest(exit_code=exit_code):
+                self.config.write_text("allow-dns=postgres\r\n"
+                                       "allow-ip=192.168.1.10\r\n"
+                                       "allow-ip = '172.20.0.0/16'   # shared network\r\n"
+                                       'allow-ip="10.0.0.7/32"   \r\n'
+                                       "allow-ip=192.168.1.10")
+                self.env["DNS_CONFIG_TEST_MUTATE"] = "1"
+                self.env["DNS_CONFIG_TEST_EXIT"] = str(exit_code)
+                result = self.run_launcher("codex")
+                self.assertEqual(result.returncode, exit_code, result.stdout + result.stderr)
+                record = json.loads(self.calls.read_text())
+                self.assertEqual(record["ips"], ["192.168.1.10", "172.20.0.0/16",
+                                                 "10.0.0.7/32", "192.168.1.10"])
+                self.assertEqual(record["ips_after_edit"], record["ips"])
+                self.assertEqual(record["names"], ["postgres"])
+                self.assertTrue(record["ip_readonly"])
+                self.assertEqual(record["ip_mode"], 0o444)
+                self.assertIn("FIREWALL_MODE=codex", record["args"])
+                for field in ("snapshot", "ip_snapshot"):
+                    self.assertFalse(Path(record[field]).exists())
+                    self.assertFalse(Path(record[field]).parent.exists())
+
+    def test_allow_ip_dump_can_be_executed_repeatedly_without_dns_settings(self):
+        self.config.write_text("allow-ip=0.0.0.0/0\nallow-ip=128.0.0.0/1\n"
+                               "allow-ip=192.168.1.3/31\nallow-ip=255.255.255.255/32\n")
+        result = self.run_launcher("dump")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((self.root / "docker-events.jsonl").exists())
+        command = result.stdout[result.stdout.index("(\n"):]
+        # dump時点の設定を使い、実行時のワークスペース編集は反映しない。
+        self.config.write_text("allow-ip=10.0.0.1\n")
+        snapshots = []
+        for _ in range(2):
+            execution = subprocess.run(["bash"], input=command, cwd=self.root, env=self.env,
+                                       text=True, capture_output=True)
+            self.assertEqual(execution.returncode, 0, execution.stdout + execution.stderr)
+            record = json.loads(self.calls.read_text())
+            self.assertEqual(record["ips"], ["0.0.0.0/0", "128.0.0.0/1", "192.168.1.3/31",
+                                             "255.255.255.255/32"])
+            self.assertNotIn("snapshot", record)
+            self.assertTrue(record["ip_readonly"])
+            self.assertFalse(Path(record["ip_snapshot"]).parent.exists())
+            snapshots.append(record["ip_snapshot"])
+        self.assertNotEqual(*snapshots)
+
+    def test_allow_ip_settings_do_not_leak_between_launcher_calls(self):
+        self.config.write_text("allow-ip=192.168.1.10\n")
+        result = subprocess.run(["bash", "-c",
+                                 'source "$1"; aicontainer || exit; '
+                                 ': > .aicontainer; aicontainer', "test", str(LAUNCHER)],
+                                cwd=self.root, env=self.env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("ip_snapshot", json.loads(self.calls.read_text()))
+
+    def test_invalid_allow_ip_is_rejected_before_hooks_or_docker(self):
+        for value in ("", "# empty", "256.1.2.3", "1.2.3", "1.2.3.4.5", "01.2.3.4",
+                      "1.2.3.4/33", "1.2.3.4/-1", "1.2.3.4/01", "1.2.3.4/",
+                      "1.2.3.4/24/24", "::1", "example.com", "1.2.3.4:80",
+                      "1.2.3.4,5.6.7.8", "1.2.3.4 5.6.7.8",
+                      "$(touch injected)", "`touch injected`", "1.2.3.4;touch injected"):
+            for args in ((), ("dump",)):
+                with self.subTest(value=value, args=args):
+                    self.config.write_text(f"allow-ip=192.168.1.10\nallow-ip={value}\n"
+                                           "before-start-up=touch hook-ran\n"
+                                           "append-network=project\ndocker-proxy-name=project\n")
+                    result = self.run_launcher(*args)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("allow-ip にはIPv4アドレスまたはCIDR", result.stderr)
+                    self.assertFalse((self.root / "injected").exists())
+                    self.assertFalse((self.root / "hook-ran").exists())
+                    self.assertFalse((self.root / "docker-events.jsonl").exists())
 
     def test_generated_network_name_survives_docker_cli_lowercasing(self):
         mock = self.root / "mktemp"

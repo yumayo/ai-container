@@ -136,6 +136,22 @@ __aicontainer_run_hook() {
   __aicontainer_log_success "hook($hook_name): completed in $(__aicontainer_format_elapsed "$started_at")"
 }
 
+# IPv4アドレスまたはCIDR（0〜32）を検証する。先頭ゼロのある数値は許可しない。
+__aicontainer_validate_ipv4_range() {
+  local range="$1" part
+  local octet='(0|[1-9][0-9]{0,2})'
+  local -a parts
+  [[ "$range" =~ ^$octet\.$octet\.$octet\.$octet(/(0|[1-9][0-9]?))?$ ]] || return 1
+  IFS='./' read -r -a parts <<< "$range"
+  for part in "${parts[@]:0:4}"; do
+    ((part <= 255)) || return 1
+  done
+  if [[ "$range" == */* ]]; then
+    ((${range##*/} <= 32)) || return 1
+  fi
+  return 0
+}
+
 # .aicontainer を解析してAICONTAINER_CONFIG連想配列に設定
 __aicontainer_parse_config() {
   local config_file=".aicontainer"
@@ -178,6 +194,20 @@ __aicontainer_parse_config() {
           return 1
         fi
         AICONTAINER_ALLOW_DNS+=("$value")
+        __aicontainer_log_info "config: $key=$value"
+      elif [ "$key" = "allow-ip" ]; then
+        # 1行に1つのIPv4/CIDR。前後の空白、引用符、行末コメントを許容する。
+        value="${value%%#*}"
+        value="${value#"${value%%[![:space:]]*}"}"
+        value="${value%"${value##*[![:space:]]}"}"
+        if [[ "$value" =~ ^\"(.*)\"$ ]] || [[ "$value" =~ ^\'(.*)\'$ ]]; then
+          value="${BASH_REMATCH[1]}"
+        fi
+        if ! __aicontainer_validate_ipv4_range "$value"; then
+          __aicontainer_log_error "allow-ip にはIPv4アドレスまたはCIDR（プレフィックス長0〜32）を1行に1つ指定してください: $value"
+          return 1
+        fi
+        AICONTAINER_ALLOW_IPS+=("$value")
         __aicontainer_log_info "config: $key=$value"
       elif [ "$key" = "dns" ]; then
         __aicontainer_log_error "dns は allow-dns に変更されました。設定ファイル .aicontainer を更新してください。"
@@ -320,6 +350,7 @@ aicontainer() {
   AICONTAINER_PATHS=()
   AICONTAINER_ENVS=()
   local -a AICONTAINER_ALLOW_DNS=()
+  local -a AICONTAINER_ALLOW_IPS=()
   local -a AICONTAINER_APPEND_NETWORKS=()
   local -a AICONTAINER_PROXY_ALLOW=()
   local -a AICONTAINER_PROXY_CONTAINERS=()
@@ -644,9 +675,12 @@ aicontainer() {
     extra_env="$extra_env -e $proxy_containers_env"
   fi
 
-  # 起動時のallow-dns設定を読み取り専用で渡し、コンテナ内からの許可先追加を防ぐ。
+  # 起動時の許可設定を読み取り専用で渡し、コンテナ内からの許可先追加を防ぐ。
   if [ ${#AICONTAINER_ALLOW_DNS[@]} -gt 0 ]; then
     extra_opts="$extra_opts --mount type=bind,source=\"\$aicontainer_dns_file\",target=/etc/aicontainer/dns,readonly"
+  fi
+  if [ ${#AICONTAINER_ALLOW_IPS[@]} -gt 0 ]; then
+    extra_opts="$extra_opts --mount type=bind,source=\"\$aicontainer_ips_file\",target=/etc/aicontainer/ips,readonly"
   fi
 
   # 追加ネットワークは起動前に接続し、外部APIへのデフォルト経路はpublic側に固定する。
@@ -684,9 +718,17 @@ aicontainer() {
       printf '%s\\n' $dns_values > \"\$aicontainer_dns_file\" || exit 1
       chmod 0444 \"\$aicontainer_dns_file\" || exit 1"
   fi
+  local ips_setup=""
+  if [ ${#AICONTAINER_ALLOW_IPS[@]} -gt 0 ]; then
+    local ips_values
+    printf -v ips_values '%q ' "${AICONTAINER_ALLOW_IPS[@]}"
+    ips_setup="aicontainer_ips_file=\"\$aicontainer_runtime_dir/ips\"
+      printf '%s\\n' $ips_values > \"\$aicontainer_ips_file\" || exit 1
+      chmod 0444 \"\$aicontainer_ips_file\" || exit 1"
+  fi
 
   # 外部通信用のpublic_networkは常に使い捨ての専用ネットワークを作る。
-  # 追加ネットワーク上の接続先もallow-dns設定とコンテナ内ファイアウォールで制限する。
+  # 追加ネットワーク上の接続先もallow-dns・allow-ip設定とファイアウォールで制限する。
   # dumpにも同じ準備・後始末を含める。追加ネットワークは削除しない。
   docker_cmd="(
     $network_version_check
@@ -700,7 +742,7 @@ aicontainer() {
       if [ \"\$aicontainer_public_network_created\" = true ]; then
         docker network rm \"\$aicontainer_public_network\" >/dev/null || printf 'Warning: failed to remove network %s\\n' \"\$aicontainer_public_network\" >&2
       fi
-      rm -f \"\$aicontainer_runtime_dir/dns\"
+      rm -f \"\$aicontainer_runtime_dir/dns\" \"\$aicontainer_runtime_dir/ips\"
       rmdir \"\$aicontainer_runtime_dir\"
       exit \"\$aicontainer_status\"
     }
@@ -709,6 +751,7 @@ aicontainer() {
     aicontainer_public_network_created=true
     $append_network_setup
     $dns_setup
+    $ips_setup
     $docker_cmd
   )"
 

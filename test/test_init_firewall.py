@@ -26,6 +26,11 @@ ANSWERS = {
 }
 
 
+def in_allowlist(state, address):
+    return any(ipaddress.ip_address(address) in ipaddress.ip_network(network, strict=False)
+               for network in state.get("allowed", []))
+
+
 def verdict(state, address, port, protocol="tcp", established=False, chain="OUTPUT", interface=None):
     """生成されたフィルタールールと既定のポリシーでパケットを判定する。"""
     family = "ip6tables" if ":" in address else "iptables"
@@ -47,7 +52,7 @@ def verdict(state, address, port, protocol="tcp", established=False, chain="OUTP
             continue
         if "--state" in rule and not established:
             continue
-        if "--match-set" in rule and address not in state.get("allowed", []):
+        if "--match-set" in rule and not in_allowlist(state, address):
             continue
         return rule[rule.index("-j") + 1]
     return state.get(family + "_policy", {}).get(chain, "ACCEPT")
@@ -86,12 +91,16 @@ def mock_main():
         if args[0] in ("destroy", "create"):
             state["allowed"] = []
         elif args[0] == "add":
-            if args[2] in state["allowed"]:
+            # hash:netでは/0は無効。登録されたCIDRはネットワーク単位で照合する。
+            network = ipaddress.ip_network(args[2], strict=False)
+            if network.prefixlen == 0:
+                result = 1
+            elif args[2] in state["allowed"]:
                 result = 0 if "-exist" in args else 1
             else:
                 state["allowed"].append(args[2])
         elif args[0] == "test":
-            result = 0 if args[2] in state["allowed"] else 1
+            result = 0 if in_allowlist(state, args[2]) else 1
     elif command == "curl":
         domain = args[-1].removeprefix("https://")
         ips = [line.split()[0] for line in hosts.splitlines()
@@ -117,9 +126,11 @@ class FirewallTest(unittest.TestCase):
         self.original_hosts = "127.0.0.1 localhost\n172.18.0.2 container custom-alias\n"
         self.hosts.write_text(self.original_hosts)
         self.dns = self.root / "dns"
+        self.ips = self.root / "ips"
         self.script = self.root / "init-firewall.sh"
         self.script.write_text(SCRIPT.read_text().replace("/etc/hosts", str(self.hosts))
-                               .replace("/etc/aicontainer/dns", str(self.dns)))
+                               .replace("/etc/aicontainer/dns", str(self.dns))
+                               .replace("/etc/aicontainer/ips", str(self.ips)))
         mock = self.root / "mock"
         mock.write_text(
             f"#!{sys.executable}\nimport sys\n"
@@ -137,10 +148,11 @@ class FirewallTest(unittest.TestCase):
     def state(self):
         return json.loads((self.root / "state.json").read_text())
 
-    def run_script(self, mode="claude", success=True):
+    def run_script(self, mode="claude", success=True, extra_args=(), extra_env=None):
         env = dict(os.environ, FIREWALL_TEST_DIR=str(self.root), PYTHONDONTWRITEBYTECODE="1",
                    PATH=str(self.root) + os.pathsep + os.environ["PATH"])
-        result = subprocess.run(["bash", str(self.script), mode], env=env,
+        env.update(extra_env or {})
+        result = subprocess.run(["bash", str(self.script), mode, *extra_args], env=env,
                                 text=True, capture_output=True)
         self.assertEqual(result.returncode == 0, success, result.stdout + result.stderr)
         return self.state()
@@ -219,6 +231,85 @@ class FirewallTest(unittest.TestCase):
         state = self.run_script()
         for address in ("172.18.0.3", "172.18.42.10", "10.42.9.10"):
             self.assertEqual(verdict(state, address, 8080), "REJECT")
+
+    def test_allow_ip_and_dns_allow_only_configured_addresses_and_responses(self):
+        for mode in ("claude", "codex"):
+            with self.subTest(mode=mode):
+                self.hosts.write_text(self.original_hosts)
+                self.dns.write_text("postgres\n")
+                self.ips.write_text("192.168.1.10\n172.20.42.7/16\n192.168.1.10\n"
+                                    "10.0.0.8/31\n10.0.1.7/32")
+                self.save_state({"answers": {**ANSWERS, "postgres": ["172.18.0.3"]}})
+                state = self.run_script(mode)
+                for address in ("192.168.1.10", "172.20.0.1", "172.20.255.254",
+                                "172.18.0.3", "10.0.0.8", "10.0.0.9", "10.0.1.7"):
+                    for protocol in ("tcp", "udp"):
+                        self.assertEqual(verdict(state, address, 8080, protocol), "ACCEPT")
+                        self.assertEqual(verdict(state, address, 8080, protocol,
+                                                 chain="INPUT", established=True), "ACCEPT")
+                        self.assertEqual(verdict(state, address, 8080, protocol,
+                                                 chain="INPUT"), "DROP")
+                        self.assertEqual(verdict(state, address, 53, protocol), "REJECT")
+                for address in ("192.168.1.11", "172.19.255.255", "172.21.0.0",
+                                "10.0.0.7", "10.0.0.10", "10.0.1.6", "10.0.1.8"):
+                    self.assertEqual(verdict(state, address, 8080), "REJECT")
+                    self.assertEqual(verdict(state, address, 8080, chain="INPUT",
+                                             established=True), "DROP")
+                resolved = [e["args"][-1] for e in state["events"] if e["command"] == "getent"]
+                self.assertNotIn("192.168.1.10", resolved)
+                self.assertNotIn("172.20.42.7/16", resolved)
+                # 再実行時は追加IPのためのDNSや環境変数を必要としない。
+                state["answers"] = {}
+                self.save_state(state)
+                rerun = self.run_script(mode)
+                self.assertEqual(rerun["allowed"], state["allowed"])
+
+    def test_allow_ip_zero_prefix_preserves_dns_local_and_ipv6_restrictions(self):
+        self.ips.write_text("0.0.0.0/0\n")
+        state = self.run_script()
+        for address in ("1.1.1.1", "128.0.0.1", "192.168.1.10", "172.18.0.1"):
+            self.assertEqual(verdict(state, address, 8080), "ACCEPT")
+            self.assertEqual(verdict(state, address, 8080, chain="INPUT", established=True), "ACCEPT")
+            self.assertEqual(verdict(state, address, 8080, chain="INPUT"), "DROP")
+            for protocol in ("tcp", "udp"):
+                self.assertEqual(verdict(state, address, 53, protocol), "REJECT")
+        for address in ("127.0.0.1", "127.0.0.11", "172.18.0.2", "::1", "2001:db8::1"):
+            for established in (False, True):
+                self.assertEqual(verdict(state, address, 8080, established=established), "REJECT")
+                self.assertEqual(verdict(state, address, 8080, chain="INPUT",
+                                         established=established), "DROP")
+        self.assertFalse(any(e["command"] == "curl" and e["args"][-1] == "https://example.com"
+                             for e in state["events"]))
+
+    def test_invalid_allow_ip_leaves_hosts_and_firewall_untouched(self):
+        for value in ("", "256.1.2.3", "1.2.3", "1.2.3.4.5", "01.2.3.4",
+                      "1.2.3.4/33", "1.2.3.4/-1", "1.2.3.4/01", "1.2.3.4/",
+                      "1.2.3.4/24/24", "::1", "example.com", "1.2.3.4:80",
+                      "1.2.3.4,5.6.7.8", "1.2.3.4 5.6.7.8", "$(touch injected)"):
+            with self.subTest(value=value):
+                self.ips.write_text("192.168.1.10\n" + value + "\n")
+                self.save_state({"answers": ANSWERS})
+                state = self.run_script(success=False)
+                self.assertEqual(self.hosts.read_text(), self.original_hosts)
+                self.assertFalse(state.get("events"))
+
+    def test_allow_ip_cannot_be_added_through_arguments_or_environment(self):
+        state = self.run_script(extra_args=("0.0.0.0/0",),
+                                extra_env={"AICONTAINER_ALLOWED_IPS": "0.0.0.0/0"})
+        self.assertEqual(verdict(state, "192.168.1.10", 8080), "REJECT")
+
+    def test_allow_ip_verification_skips_allowed_cidr_and_probes_outside_it(self):
+        self.ips.write_text("198.51.100.0/24\n")
+        state = self.run_script()
+        self.assertEqual(verdict(state, "198.51.100.10", 443), "ACCEPT")
+        self.assertFalse(any(e["command"] == "curl" and e["args"][-1] == "https://example.com"
+                             for e in state["events"]))
+        self.hosts.write_text(self.original_hosts)
+        self.save_state({"answers": {**ANSWERS, "example.com": ["198.51.100.10", "198.51.101.10"]}})
+        state = self.run_script()
+        probe = next(e for e in state["events"] if e["command"] == "curl"
+                     and e["args"][-1] == "https://example.com")
+        self.assertEqual(probe["resolved"], ["198.51.101.10"])
 
     def test_invalid_dns_names_leave_hosts_and_firewall_untouched(self):
         for name in ("", "-postgres", "postgres:5432", "postgres redis", "$(touch injected)", "a" * 254):

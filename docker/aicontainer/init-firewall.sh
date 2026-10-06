@@ -37,6 +37,22 @@ log_error() {
     echo -e "${RED}[$(log_now)] ✗ $1${NC}" >&2
 }
 
+# ホスト側の検証に加えて、読み取り専用ファイルの内容も変更前に検証する。
+validate_ipv4_range() {
+    local range="$1" part
+    local octet='(0|[1-9][0-9]{0,2})'
+    local -a parts
+    [[ "$range" =~ ^$octet\.$octet\.$octet\.$octet(/(0|[1-9][0-9]?))?$ ]] || return 1
+    IFS='./' read -r -a parts <<< "$range"
+    for part in "${parts[@]:0:4}"; do
+        ((part <= 255)) || return 1
+    done
+    if [[ "$range" == */* ]]; then
+        ((${range##*/} <= 32)) || return 1
+    fi
+    return 0
+}
+
 # モード引数の処理（デフォルト: claude）
 MODE="${1:-claude}"
 
@@ -71,8 +87,20 @@ if [ -f /etc/aicontainer/dns ]; then
     done < /etc/aicontainer/dns
 fi
 
+ALLOWED_IPS=()
+if [ -f /etc/aicontainer/ips ]; then
+    while IFS= read -r range || [ -n "$range" ]; do
+        if ! validate_ipv4_range "$range"; then
+            log_error "allow-ip にはIPv4アドレスまたはCIDR（プレフィックス長0〜32）を指定してください: $range"
+            exit 1
+        fi
+        ALLOWED_IPS+=("$range")
+    done < /etc/aicontainer/ips
+fi
+
 log_info "Firewall mode: $MODE"
 log_info "Allowed domains: ${ALLOWED_DOMAINS[*]}"
+log_info "Allowed IP ranges: ${ALLOWED_IPS[*]}"
 
 # ファイアウォールを変更する前に、必要な名前をすべて解決する。
 # getentは/etc/hostsも参照するため、DNSを無効化した後も再実行できる。
@@ -164,7 +192,18 @@ for domain in "${ALLOWED_DOMAINS[@]}"; do
     done <<< "${DOMAIN_IPS[$domain]}"
 done
 
-# API・認証先とallow-dns設定の名前から解決したIPへの通信を全ポートで許可する。
+for range in "${ALLOWED_IPS[@]}"; do
+    log_info "Adding $range for allow-ip"
+    if [[ "$range" == */0 ]]; then
+        # hash:netは/0を格納できないため、IPv4全体を2つの/1として登録する。
+        ipset add allowed-domains 0.0.0.0/1 -exist
+        ipset add allowed-domains 128.0.0.0/1 -exist
+    else
+        ipset add allowed-domains "$range" -exist
+    fi
+done
+
+# API・認証先、allow-dnsから解決したIP、allow-ipの範囲への通信を全ポートで許可する。
 # ただし、上で設定したDNSの拒否を優先する。
 # 応答の送信元IPも制限し、既存の接続が許可リストを迂回するのを防ぐ。
 iptables -A INPUT -m set --match-set allowed-domains src -m state --state ESTABLISHED -j ACCEPT
@@ -177,7 +216,7 @@ ip6tables -A OUTPUT -j REJECT --reject-with icmp6-adm-prohibited
 log_success "Firewall configuration complete"
 log_step "Verifying firewall rules..."
 
-# 追加のallow-dns設定と重複しないIPを選び、通信の拒否を確認する。
+# allow-dns・allow-ipの許可範囲に含まれないIPを選び、通信の拒否を確認する。
 BLOCKED_IP=""
 while read -r ip; do
     if ! ipset test allowed-domains "$ip" >/dev/null 2>&1; then
