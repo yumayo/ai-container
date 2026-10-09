@@ -22,6 +22,13 @@ echo 'if [ -f ~/.bash_ai_container ]; then . ~/.bash_ai_container; fi' >> ~/.bas
 bash install.sh rebuild  # ベースイメージ含め全て再ビルド
 ```
 
+Git LFS はベースイメージにインストールし、システム全体で初期設定済みです。既存環境への追加は、ホスト側で次を実行してからAIコンテナを起動し直してください。
+
+```sh
+bash install.sh base
+bash install.sh main
+```
+
 ## 使い方
 
 ```sh
