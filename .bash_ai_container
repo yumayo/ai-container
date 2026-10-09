@@ -326,6 +326,50 @@ __aicontainer_start_proxy() {
   __aicontainer_log_success "docker-proxy($2): ready"
 }
 
+# 異常終了などで残った専用ネットワークを回収する。dumpにも関数ごと埋め込む。
+__aicontainer_cleanup_unused_networks() {
+  local candidates now network_id details name driver icc endpoints created kind
+  local created_at attached protected
+  now="$(date +%s)" || return 0
+  if ! candidates="$(docker network ls --no-trunc --filter 'name=^yumayo-ai-' --format '{{.ID}}')"; then
+    printf 'Warning: failed to list unused AI container networks; skipping cleanup\n' >&2
+    return 0
+  fi
+
+  while IFS= read -r network_id; do
+    [ -n "$network_id" ] || continue
+    # IDで確認・削除し、同名ネットワークの作り直しとの競合を避ける。
+    details="$(docker network inspect --format '{{.Name}}|{{.Driver}}|{{index .Options "com.docker.network.bridge.enable_icc"}}|{{len .Containers}}|{{json .Created}}|{{if .Labels}}{{index .Labels "io.yumayo.aicontainer.network"}}{{end}}' "$network_id" 2>/dev/null)" || continue
+    IFS='|' read -r name driver icc endpoints created kind <<< "$details"
+    [[ "$name" =~ ^yumayo-ai-[a-z0-9]{10}$ ]] || continue
+    [ "$driver" = bridge ] && [ "$icc" = false ] && [ "$endpoints" = 0 ] || continue
+    # ラベル導入前の専用ネットワークも、名前とbridge設定が一致する場合に回収する。
+    case "$kind" in public|''|'<no value>') ;; *) continue ;; esac
+    for protected in "$@"; do
+      [ "$name" = "$protected" ] && continue 2
+    done
+
+    # 未接続でも起動準備中の可能性があるため、作成直後の5分間は保留する。
+    # jsonで日時をRFC3339に揃え、文字列を囲む引用符を外す。
+    created="${created#\"}"
+    created="${created%\"}"
+    [[ "$created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T ]] || continue
+    created_at="$(date -d "$created" +%s 2>/dev/null)" || continue
+    [[ "$created_at" =~ ^[0-9]+$ ]] || continue
+    ((now - created_at >= 300)) || continue
+    # 停止中・作成済みのコンテナによる参照も保護する。確認失敗時は削除しない。
+    attached="$(docker ps -aq --filter "network=$network_id")" || continue
+    [ -z "$attached" ] || continue
+    # 判定後に接続された場合はDocker側が削除を拒否する。強制切断はしない。
+    if docker network rm "$network_id" >/dev/null; then
+      printf 'Removed unused AI container network: %s\n' "$name"
+    else
+      printf 'Warning: failed to remove unused network %s; continuing startup\n' "$name" >&2
+    fi
+  done <<< "$candidates"
+  return 0
+}
+
 __aicontainer_prepare_mount() {
   local src="$1"
   local dst="$2"
@@ -730,8 +774,12 @@ aicontainer() {
   # 外部通信用のpublic_networkは常に使い捨ての専用ネットワークを作る。
   # 追加ネットワーク上の接続先もallow-dns・allow-ip設定とファイアウォールで制限する。
   # dumpにも同じ準備・後始末を含める。追加ネットワークは削除しない。
+  local protected_networks
+  printf -v protected_networks '%q ' "${AICONTAINER_APPEND_NETWORKS[@]}"
   docker_cmd="(
     $network_version_check
+    $(declare -f __aicontainer_cleanup_unused_networks)
+    __aicontainer_cleanup_unused_networks $protected_networks
     aicontainer_runtime_dir=\$(mktemp -d /tmp/aicontainer.XXXXXXXXXX) || exit 1
     aicontainer_public_network=\"yumayo-ai-\${aicontainer_runtime_dir##*.}\"
     # Docker CLIが--network name=...形式の名前を小文字に変換するため、作成時も揃える。
@@ -747,7 +795,7 @@ aicontainer() {
       exit \"\$aicontainer_status\"
     }
     trap aicontainer_cleanup EXIT
-    docker network create --driver bridge --opt com.docker.network.bridge.enable_icc=false \"\$aicontainer_public_network\" >/dev/null || exit 1
+    docker network create --driver bridge --opt com.docker.network.bridge.enable_icc=false --label io.yumayo.aicontainer.network=public \"\$aicontainer_public_network\" >/dev/null || exit 1
     aicontainer_public_network_created=true
     $append_network_setup
     $dns_setup

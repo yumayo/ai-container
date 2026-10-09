@@ -2,6 +2,7 @@
 
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import subprocess
 import sys
@@ -39,6 +40,16 @@ if args[0] == "version":
     sys.exit(0)
 network_state = root / "networks.json"
 networks = json.loads(network_state.read_text()) if network_state.exists() else []
+details_file = root / "network-details.json"
+network_details = json.loads(details_file.read_text()) if details_file.exists() else {}
+if args[:2] == ["network", "ls"]:
+    assert args[2:] == ["--no-trunc", "--filter", "name=^yumayo-ai-", "--format", "{{.ID}}"]
+    if os.environ.get("TEST_NETWORK_LIST_FAIL"):
+        sys.exit(1)
+    for network_id, details in network_details.items():
+        if details["name"] in networks and details["name"].startswith("yumayo-ai-"):
+            print(network_id)
+    sys.exit(0)
 if args[:2] == ["network", "create"]:
     failure = os.environ.get("TEST_NETWORK_CREATE_FAIL")
     if (failure in ("1", args[-1]) or
@@ -49,11 +60,31 @@ if args[:2] == ["network", "create"]:
     network_state.write_text(json.dumps(networks))
     sys.exit(0)
 if args[:2] == ["network", "inspect"]:
+    if "--format" in args:
+        details = network_details.get(args[-1])
+        if details is None or os.environ.get("TEST_NETWORK_INSPECT_FAIL"):
+            sys.exit(1)
+        assert "{{json .Created}}" in args[args.index("--format") + 1]
+        print("|".join(json.dumps(details[field]) if field == "created" else str(details[field]) for field in
+                       ("name", "driver", "icc", "endpoints", "created", "label")))
+        sys.exit(0)
     exists = args[-1] == os.environ.get("TEST_EXISTING_NETWORK") or args[-1] in networks
     sys.exit(0 if exists else 1)
 if args[:2] == ["network", "rm"]:
-    networks.remove(args[-1])
+    details = network_details.get(args[-1])
+    if details and (details["endpoints"] or details["references"] or
+                    os.environ.get("TEST_NETWORK_REMOVE_FAIL")):
+        print("network has active endpoints", file=sys.stderr)
+        sys.exit(1)
+    networks.remove(details["name"] if details else args[-1])
     network_state.write_text(json.dumps(networks))
+    sys.exit(0)
+if args[:2] == ["ps", "-aq"]:
+    assert args[2] == "--filter" and args[3].startswith("network=")
+    if os.environ.get("TEST_NETWORK_PS_FAIL"):
+        sys.exit(1)
+    details = network_details[args[3].removeprefix("network=")]
+    print("\\n".join(details["references"]))
     sys.exit(0)
 if args[0] == "inspect":
     print(os.environ.get("TEST_PROXY_NETWORK", "bridge"))
@@ -209,6 +240,7 @@ sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
         self.assertEqual(create[-1], name)
         self.assertEqual(create[create.index("--driver") + 1], "bridge")
         self.assertIn("com.docker.network.bridge.enable_icc=false", create)
+        self.assertIn("io.yumayo.aicontainer.network=public", create)
         self.assertNotIn("--internal", create)  # 外部APIへの経路は維持する。
         run = next(event for event in events if event[:2] == ["run", "-ti"] and
                    (name in event or f"name={name},gw-priority=1" in event))
@@ -237,6 +269,104 @@ sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
             self.assertIn(name, json.loads((self.root / "networks.json").read_text()))
         else:
             self.assertEqual(creates, [])
+
+    def seed_networks(self, *overrides):
+        created = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        details = {}
+        for index, override in enumerate(overrides, start=1):
+            details[f"{index:064x}"] = dict(
+                {"name": f"yumayo-ai-{index:010d}", "driver": "bridge", "icc": "false",
+                 "endpoints": 0, "created": created, "label": "public", "references": []},
+                **override)
+        (self.root / "network-details.json").write_text(json.dumps(details))
+        (self.root / "networks.json").write_text(json.dumps([n["name"] for n in details.values()]))
+        return details
+
+    def test_startup_removes_stale_dedicated_networks_including_unlabelled_ones(self):
+        details = self.seed_networks({}, {"label": ""}, {"label": "<no value>"})
+        result = self.run_launcher()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        events = self.docker_events()
+        create_index = next(i for i, event in enumerate(events) if event[:2] == ["network", "create"])
+        for network_id, network in details.items():
+            self.assertLess(events.index(["network", "rm", network_id]), create_index)
+            self.assertIn(network["name"], result.stdout)
+        self.assertEqual(json.loads((self.root / "networks.json").read_text()), [])
+
+    def test_startup_preserves_shared_unrelated_and_referenced_networks(self):
+        details = self.seed_networks(
+            {"name": "project"}, {"name": "yumayo-ai-project"},
+            {"name": "yumayo-ai-0123456789-extra"}, {"icc": "true"}, {"icc": "<no value>"},
+            {"driver": "overlay"}, {"label": "shared"},
+            {"endpoints": 1}, {"references": ["stopped-container"]},
+            {"references": ["created-container"]})
+        result = self.run_launcher()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for network_id in details:
+            self.assertNotIn(["network", "rm", network_id], self.docker_events())
+        self.assertEqual(json.loads((self.root / "networks.json").read_text()),
+                         [n["name"] for n in details.values()])
+
+    def test_startup_preserves_networks_that_are_recent_or_have_unknown_creation_time(self):
+        now = datetime.now(timezone.utc)
+        details = self.seed_networks(
+            {"created": now.isoformat()},
+            {"created": (now - timedelta(minutes=4)).isoformat()},
+            {"created": (now + timedelta(hours=1)).isoformat()},
+            {"created": "unknown"}, {"created": ""}, {"created": "2026-99-99T00:00:00Z"})
+        result = self.run_launcher()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for network_id in details:
+            self.assertNotIn(["network", "rm", network_id], self.docker_events())
+
+    def test_startup_preserves_explicit_append_network_even_if_it_looks_dedicated(self):
+        details = self.seed_networks({})
+        network_id, network = next(iter(details.items()))
+        self.config.write_text(f"append-network={network['name']}\n")
+        result = self.run_launcher()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn(["network", "rm", network_id], self.docker_events())
+        self.assert_shared_network_usage(network["name"])
+        self.assert_attached_networks(json.loads(self.calls.read_text()), network["name"])
+
+    def test_startup_skips_cleanup_if_it_cannot_establish_that_a_network_is_unused(self):
+        for failure in ("TEST_NETWORK_LIST_FAIL", "TEST_NETWORK_INSPECT_FAIL", "TEST_NETWORK_PS_FAIL"):
+            with self.subTest(failure=failure):
+                details = self.seed_networks({})
+                self.env[failure] = "1"
+                try:
+                    result = self.run_launcher()
+                finally:
+                    del self.env[failure]
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                network_id, network = next(iter(details.items()))
+                self.assertNotIn(["network", "rm", network_id], self.docker_events())
+                self.assertIn(network["name"], json.loads((self.root / "networks.json").read_text()))
+                self.assertTrue(self.calls.exists())
+
+    def test_cleanup_removal_failure_continues_startup_and_preserves_ai_exit_status(self):
+        details = self.seed_networks({})
+        self.env.update(TEST_NETWORK_REMOVE_FAIL="1", DNS_CONFIG_TEST_EXIT="7")
+        result = self.run_launcher()
+        self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
+        network_id, network = next(iter(details.items()))
+        self.assertIn(["network", "rm", network_id], self.docker_events())
+        self.assertIn("continuing startup", result.stderr)
+        self.assertEqual(json.loads((self.root / "networks.json").read_text()), [network["name"]])
+        self.assertTrue(self.calls.exists())
+
+    def test_dump_cleans_up_stale_networks_only_when_executed(self):
+        details = self.seed_networks({})
+        result = self.run_launcher("dump")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((self.root / "docker-events.jsonl").exists())
+        command = result.stdout[result.stdout.index("(\n"):]
+        execution = subprocess.run(["bash"], input=command, cwd=self.root, env=self.env,
+                                   text=True, capture_output=True)
+        self.assertEqual(execution.returncode, 0, execution.stdout + execution.stderr)
+        for network_id in details:
+            self.assertIn(["network", "rm", network_id], self.docker_events())
+        self.assertEqual(json.loads((self.root / "networks.json").read_text()), [])
 
     def test_repeated_allow_dns_settings_are_passed_in_a_readonly_snapshot(self):
         self.config.write_text("append-network=project\nallow-dns=postgres\nallow-dns='web_api'\nallow-dns=service.local   \n")
