@@ -112,6 +112,20 @@ try {
         Assert-True ((& $originalFind 'wsl.exe') -eq 'C:\Windows\System32\wsl.exe') 'Reuse the executable resolved by the terminal.'
     }
 
+    & {
+        function Get-Command {
+            param($Name, $CommandType, $ErrorAction)
+            [pscustomobject] @{ Source = "C:\Windows\System32\$Name" }
+            [pscustomobject] @{ Source = "C:\Users\Test\AppData\Local\Microsoft\WindowsApps\$Name" }
+        }
+        function Test-Path { throw 'Fixed paths must not override the terminal executable.' }
+        foreach ($name in @('wsl.exe', 'wslc.exe')) {
+            $executable = & $originalFind $name
+            Assert-True ($executable -is [string]) 'Multiple PATH matches must return a single string for native command parameters.'
+            Assert-True ($executable -eq "C:\Windows\System32\$name") 'Select the first application in PATH order.'
+        }
+    }
+
     Reset-Fixture
     $script:version = $null
     $script:featureState = 2

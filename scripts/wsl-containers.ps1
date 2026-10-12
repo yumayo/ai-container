@@ -15,7 +15,9 @@ function Find-AiWslExecutable {
     param([Parameter(Mandatory = $true)][string] $Name)
 
     # Use the same executable as the calling terminal before trying fixed paths.
-    $command = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue
+    # Get-Command can return multiple applications (e.g. System32 and WindowsApps).
+    $command = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
     if ($command) { return $command.Source }
 
     # An installation can finish before the current terminal's PATH is refreshed.
