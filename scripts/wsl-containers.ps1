@@ -262,8 +262,22 @@ function Invoke-AiWslInteractive {
     $PSNativeCommandUseErrorActionPreference = $false
     # session run provides pipes, not a PTY. Use the native container terminal
     # for the runner created through Docker. Do not capture/pipe this output.
+    Write-Host "Starting interactive launcher: $Name"
     & $Wslc start --attach --interactive $Name
     $script:AiWslExitCode = $LASTEXITCODE
+    if ($script:AiWslExitCode -ne 0) {
+        Write-Warning "wslc start --attach --interactive $Name exited with code $script:AiWslExitCode."
+        try {
+            # Capture only runtime state, before cleanup removes the container.
+            # Full inspect output can contain credentials in environment variables.
+            $state = Read-AiWslCommand $Wslc @(
+                'system', 'session', 'run', 'docker', 'inspect', '--format', '{{json .State}}', $Name
+            )
+            Write-Host "Launcher state before cleanup: $state"
+        } catch {
+            Write-Warning "Could not read launcher state: $_"
+        }
+    }
 }
 
 function Start-AiWslContainer {

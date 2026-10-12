@@ -6,6 +6,7 @@ $ErrorActionPreference = 'Stop'
 $originalProbe = ${function:Get-AiWslVersion}
 $originalFind = ${function:Find-AiWslExecutable}
 $originalCommand = ${function:Invoke-AiWslCommand}
+$originalInteractive = ${function:Invoke-AiWslInteractive}
 $script:checks = 0
 $script:calls = New-Object 'System.Collections.Generic.List[object]'
 
@@ -310,6 +311,28 @@ try {
     $script:failCarrierStart = $true
     Assert-Throws { Start-AiWslContainer -Wslc 'wslc.exe' -Repository $temporary -Workspace $temporary } 'Share start failed'
     Assert-True (($script:calls[-1].Arguments -join ' ') -match '^rm --force yumayo-ai-share-') 'Release a carrier whose start failed.'
+
+    & {
+        Reset-Fixture
+        function Test-InteractiveFailure { $global:LASTEXITCODE = 23 }
+        function Read-AiWslCommand {
+            param([string] $Wslc, [string[]] $Arguments)
+            $script:calls.Add([pscustomobject] @{ Kind = 'diagnostic'; Arguments = $Arguments })
+            $global:LASTEXITCODE = 0
+            return '{"Status":"created","ExitCode":0,"Error":""}'
+        }
+        & $originalInteractive 'Test-InteractiveFailure' 'test-launcher'
+        Assert-True ($script:AiWslExitCode -eq 23) 'Successful diagnostics must not replace the failed attachment exit code.'
+        Assert-True ($script:calls.Count -eq 1 -and $script:calls[0].Arguments -contains '{{json .State}}') 'Inspect only runtime state after attachment failure.'
+
+        function Read-AiWslCommand {
+            param([string] $Wslc, [string[]] $Arguments)
+            $global:LASTEXITCODE = 1
+            throw 'Engine unavailable'
+        }
+        & $originalInteractive 'Test-InteractiveFailure' 'test-launcher'
+        Assert-True ($script:AiWslExitCode -eq 23) 'Failed diagnostics must preserve the attachment exit code and allow cleanup.'
+    }
 
     # Check real native exit handling using a local PowerShell child, not WSL.
     $shell = (Get-Process -Id $PID).Path

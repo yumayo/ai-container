@@ -80,6 +80,10 @@ Windows のフォルダーはまず `wslc` で共有し、Docker の `inspect` �
 
 終了時は、その起動で作成した起動用コンテナ・AI コンテナ・専用ネットワーク・フォルダー共有用コンテナを後始末します。所有者ラベルで対象を絞り、他のコンテナ、追加ネットワーク、継続利用する Proxy は削除しません。Windows 自体の強制終了などで後始末できない場合は、`wslc container list --all` で `yumayo-ai-share-*` / `yumayo-ai-launch-*` を確認できます。
 
+`Starting interactive launcher` の後で失敗した場合は、起動用コンテナの作成後、端末の接続または起動したプロセスで失敗しています。削除する前に Docker の実行状態を `Launcher state before cleanup` として表示します。`Status=created` ならコンテナ内の起動処理はまだ始まっていません。`E_UNEXPECTED` だけでは原因を特定できないため、WSL 側の終了コードとこの状態を合わせて確認してください。診断のために読み取る情報は `.State` に限定し、環境変数を含む inspect 全体は表示しません。
+
+起動前に表示される `-P INPUT ACCEPT` などは、作業フォルダーを持たない権限確認用の一時コンテナの出力です。AI コンテナのファイアウォールの状態を表示したものではありません。エラー後の `yumayo-ai-launch-*` / `yumayo-ai-share-*` の表示は削除コマンドの出力で、AI の起動成功を意味しません。
+
 ## 現段階の範囲
 
 - `.aicontainer`、`.aiignore`、`.aimount` の処理は既存の Bash ランチャーを使用します。
