@@ -100,7 +100,24 @@ BIOS / UEFI のハードウェア仮想化が有効である必要がありま�
 dism.exe /Online /Enable-Feature /FeatureName:VirtualMachinePlatform /All /NoRestart
 ```
 
-成功後は Windows を再起動し、通常権限の PowerShell で起動スクリプトを再実行します。`wsl --version` は WSL 本体のバージョン確認であり、仮想化機能が動作することまでは確認しません。Windows サンドボックス内で失敗する場合は Windows ホスト側で実行してください。その他の仮想マシンでは、Windows 機能を追加できることと、ホストが入れ子の仮想化を許可していることを確認してください。
+成功後は Windows を再起動し、通常権限の PowerShell で起動スクリプトを再実行します。`wsl --version` は WSL 本体のバージョン確認であり、仮想化機能が動作することまでは確認しません。仮想マシンでは、Windows 機能を追加できることと、ホストが入れ子の仮想化を許可していることを確認してください。クリーンインストールを繰り返し検証する場合は、後述の仮想マシンとチェックポイントを使う方法を推奨します。
+
+DISM が終了コード `12006`、ログに `0x80072EE6` を出した場合は、Windows の機能追加処理で URL のスキームを認識できなかったことを示します。これだけでは、どの URL や設定が原因かは分かりません。通常の Windows で発生した場合は、Windows Update / WSUS とオプション機能の取得元設定、および CBS ログを確認します。次は設定を変更しない確認コマンドです。CBS ログの読み取りでアクセスが拒否される場合は、管理者の PowerShell で実行してください。
+
+```powershell
+Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate' -ErrorAction SilentlyContinue |
+    Select-Object WUServer, WUStatusServer
+Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -ErrorAction SilentlyContinue |
+    Select-Object UseWUServer
+Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Servicing' -ErrorAction SilentlyContinue |
+    Select-Object LocalSourcePath
+Select-String -Path "$env:WINDIR\Logs\CBS\CBS.log" -Pattern '80072ee6', '12006' -Context 3,3 |
+    Select-Object -Last 5
+```
+
+レジストリの項目が存在しなければ、その確認コマンドは何も表示しません。`WUServer` に URL が設定されている場合は、`http://` または `https://` を含む正しい取得元か確認してください。企業などで管理されている設定は管理者に確認します。スクリプトは取得元の変更や Windows Update のリセットを自動実行しません。`-WebDownload` は WSL 本体の配布経路を指定するためのオプションで、この DISM エラーの対処にはなりません。
+
+DISM ログの `Encountered an unknown option "featurename"` が `Info` として出ていても、その行だけで `/FeatureName` が誤りとは判断できません。後続の `Error` と HRESULT を確認してください。また、`No Sandbox was created, DISM running in-place` は DISM 自身の作業方式の記録で、Windows サンドボックス内かどうかを示すものではありません。
 
 `.gitattributes` で Linux 向けの Dockerfile とシェルスクリプトを LF に固定します。古い作業コピーに CRLF が残っていた場合は、ファイル名を表示して停止します。エディターで LF に変更するか、変更を退避して新しい作業コピーを取得してください。
 
@@ -115,6 +132,50 @@ python3 -m unittest discover -s test -p 'test_*.py'
 ```
 
 実機では未導入時の UAC・再起動、旧版からの更新、イメージビルド、内蔵 Docker で作成したコンテナへの `wslc` の端末接続、ファイアウォールの疎通検証、セッションの保存、終了時の後始末を確認する必要があります。
+
+## WSL の導入を繰り返し検証する
+
+ホスト PC の WSL を削除せずに未導入状態を再現するには、通常の Windows 11 仮想マシンで導入前のチェックポイントを保存します。Windows サンドボックスは通常の Windows インストールと機能追加の条件が異なるため、そこでの DISM の失敗だけでは通常環境での導入可否を判断できません。
+
+| 確認する内容 | 検証環境 | 確認できる範囲 |
+| --- | --- | --- |
+| 未導入・導入済み・旧版・機能無効・セットアップ失敗時の分岐 | Windows サンドボックスや通常の Windows で既存の PowerShell モックテストを実行 | WSL、DISM、Docker を実行せずにスクリプトの判断と呼び出し内容を確認 |
+| WSL の実際の導入、UAC、Windows 機能の有効化、再起動後の継続 | 入れ子の仮想化を有効にした Windows 11 VM | OS のセットアップから再起動までを確認 |
+| イメージのビルドと AI コンテナの起動 | WSL 導入済みの同じ VM | 実際の WSL Containers と Docker Engine を使って確認 |
+
+モックテストは、WSL が未導入でも導入済みでも同じコマンドで実行できます。モックの成功は実際のインストールや AI 起動の成功を保証するものではありません。
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\test\test_wsl_containers.ps1
+```
+
+Hyper-V を利用できるホストでは、次の手順で通しの検証を繰り返せます。対応する CPU と Windows 構成が必要です。VM の作成や以下の手順はスクリプトから自動実行しません。
+
+1. 検証用の Windows 11 VM を作成し、Windows の初期設定を済ませます。WSL を導入する前にゲストをシャットダウンします。
+2. ホストの管理者 PowerShell で、停止中の検証用 VM に入れ子の仮想化を許可し、導入前の状態を保存します。`AIContainer-Test` は実際の検証用 VM 名に置き換えてください。
+
+   ```powershell
+   Set-VMProcessor -VMName 'AIContainer-Test' -ExposeVirtualizationExtensions $true
+   Checkpoint-VM -Name 'AIContainer-Test' -SnapshotName 'before-wsl'
+   Start-VM -Name 'AIContainer-Test'
+   ```
+
+3. ゲストにリポジトリをコピーし、通常権限の PowerShell から次を実行します。WSL 本体や機能の導入で再起動を案内されたら、ゲストを再起動して同じコマンドを繰り返し、セットアップが終了コード `0` で完了することを確認します。
+
+   ```powershell
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-wsl.ps1 -Target setup
+   $LASTEXITCODE
+   ```
+
+4. 導入後のゲストをシャットダウンし、ホストで `wsl-ready` という別のチェックポイントも保存します。その状態を使うと、イメージビルドや AI 起動のテストを WSL 導入からやり直す必要がありません。ゲストを起動し、既存のプロジェクトを指定して `start-wsl.ps1` を実行します。
+5. 導入を再検証するときは、必要なログと変更を VM の外へ保存し、ゲストをシャットダウンしてからホストで次を実行します。チェックポイントの復元では、保存時点より後のゲスト内の変更が失われます。
+
+   ```powershell
+   Restore-VMSnapshot -VMName 'AIContainer-Test' -Name 'before-wsl'
+   Start-VM -Name 'AIContainer-Test'
+   ```
+
+この環境では PowerShell と Hyper-V を実行できないため、モックテストの実行と上記 VM 手順の動作確認は未実施です。
 
 ## 参照
 

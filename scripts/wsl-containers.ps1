@@ -102,7 +102,12 @@ function Enable-AiWslVirtualMachinePlatform {
         "/LogPath:`"$log`"")
     $code = Invoke-AiWslElevatedCommand -Executable $dism -Arguments $arguments
     if ($code -notin @(0, 3010)) {
-        throw "Enabling VirtualMachinePlatform failed (exit $code). DISM log: $log. See docs/WSL.md for diagnostics."
+        $hint = 'See docs/WSL.md for diagnostics.'
+        if ($code -eq 12006) {
+            $cbsLog = Join-Path $env:SystemRoot 'Logs\CBS\CBS.log'
+            $hint = "Windows servicing reported 0x80072EE6 (unrecognized URL scheme). If testing installation inside Windows Sandbox, use a Windows VM with nested virtualization and a pre-install checkpoint. On a regular Windows installation, check Windows Update/WSUS and optional-feature source settings. CBS log: $cbsLog. See docs/WSL.md for test and diagnostic instructions."
+        }
+        throw "Enabling VirtualMachinePlatform failed (exit $code). DISM log: $log. $hint"
     }
 }
 
