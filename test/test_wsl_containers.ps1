@@ -29,6 +29,7 @@ function Reset-Fixture {
     $script:hasWslc = $true
     $script:featureState = 1
     $script:setupExit = 0
+    $script:featureExit = 0
     $script:updateWorks = $true
     $script:failImage = ''
     $script:failCarrierStart = $false
@@ -57,6 +58,14 @@ function Invoke-AiWslSetupCommand {
         $script:hasWslc = $true
     }
     return $script:setupExit
+}
+
+function Invoke-AiWslElevatedCommand {
+    param([string] $Executable, [string[]] $Arguments)
+    $script:calls.Add([pscustomobject] @{
+        Kind = 'feature'; Executable = $Executable; Arguments = $Arguments
+    })
+    return $script:featureExit
 }
 
 function Invoke-AiWslCommand {
@@ -101,7 +110,10 @@ $proxyContext = Join-Path $temporary 'docker/docker-proxy'
 $null = New-Item -ItemType Directory -Path $proxyContext -Force
 [IO.File]::WriteAllText((Join-Path $proxyContext 'Dockerfile'), "# LF fixture`n")
 [IO.File]::WriteAllText((Join-Path $proxyContext 'entrypoint.sh'), "# LF fixture`n")
+$originalSystemRoot = $env:SystemRoot
 try {
+    # Allow these mocked Windows commands to be tested with PowerShell on Linux.
+    if (-not $env:SystemRoot) { $env:SystemRoot = $temporary }
     # A working terminal command must take precedence over another installed copy.
     & {
         function Get-Command {
@@ -135,10 +147,38 @@ try {
     Assert-True (($script:calls[0].Arguments -join ' ') -eq '--install --no-distribution') 'Do not install Ubuntu.'
 
     Reset-Fixture
+    $script:version = $null
     $script:featureState = 2
     $result = Initialize-AiWsl -WebDownload
-    Assert-True ($result.ExitCode -eq 3010) 'Installed WSL with disabled VM platform still requires setup.'
+    Assert-True ($result.ExitCode -eq 3010) 'A web installation must stop for reboot.'
     Assert-True ($script:calls[0].Arguments -contains '--web-download') 'Pass the explicitly requested download mode.'
+
+    foreach ($state in @(2, 3)) {
+        foreach ($code in @(0, 3010)) {
+            Reset-Fixture
+            $script:featureState = $state
+            $script:featureExit = $code
+            $result = Initialize-AiWsl -WebDownload
+            Assert-True ($result.ExitCode -eq 3010 -and $null -eq $result.Wslc) 'Enabling the VM platform must stop for reboot even on exit zero.'
+            Assert-True ($script:calls.Count -eq 1 -and $script:calls[0].Kind -eq 'feature') 'Installed WSL must enable the feature without reinstalling or invoking wslc.'
+            $call = $script:calls[0]
+            Assert-True ($call.Executable -eq (Join-Path $env:SystemRoot 'System32\dism.exe')) 'Use the Windows DISM executable.'
+            foreach ($argument in @('/Online', '/Enable-Feature', '/FeatureName:VirtualMachinePlatform', '/All', '/NoRestart')) {
+                Assert-True ($call.Arguments -contains $argument) "Missing feature setup argument: $argument"
+            }
+            Assert-True (-not ($call.Arguments -contains '--web-download')) 'The WSL download switch does not apply to DISM.'
+            $logArgument = @($call.Arguments | Where-Object { $_ -like '/LogPath:*' })
+            Assert-True ($logArgument.Count -eq 1 -and $logArgument[0] -match '^/LogPath:".+aicontainer-vmp-[0-9a-f]{32}\.log"$') 'Preserve diagnostics in a unique, quoted log path.'
+        }
+    }
+
+    foreach ($code in @(-1, 5, 87)) {
+        Reset-Fixture
+        $script:featureState = 2
+        $script:featureExit = $code
+        Assert-Throws { Initialize-AiWsl } "VirtualMachinePlatform failed \(exit $code\).*DISM log:"
+        Assert-True ($script:calls.Count -eq 1 -and $script:calls[0].Kind -eq 'feature') 'Feature setup failure must stop without reinstalling WSL or invoking wslc.'
+    }
 
     foreach ($code in @(3010, 1641)) {
         Reset-Fixture
@@ -311,5 +351,6 @@ try {
 
     Write-Host "Passed $script:checks assertions."
 } finally {
+    $env:SystemRoot = $originalSystemRoot
     Remove-Item -LiteralPath $temporary -Recurse -Force
 }

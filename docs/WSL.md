@@ -28,7 +28,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start-wsl.ps1 -Workspa
 
 導入済みの WSL が古ければ `wsl --update` を実行します。プレビュー版は要求せず、安定版の WSL 3.0.1 以降を使用します。初回インストール時や更新が再起動を要求した場合は終了コード `3010` で停止します。自動再起動やログオン時の自動実行は登録しません。
 
-WSL の実行ファイルはターミナルの PATH を優先して探し、見つからない場合は標準のインストール先を確認します。起動時に実行ファイルの場所、検出した WSL バージョン、`VirtualMachinePlatform` の状態を表示します。`wsl --version` が成功してもバージョンを読み取れない場合や、Windows 機能の状態が不明な場合は、自動インストールに進まず診断情報を表示して停止します。WSL が導入済みでも `VirtualMachinePlatform` が無効なら、その機能を有効にするためのセットアップが必要です。
+WSL の実行ファイルはターミナルの PATH を優先して探し、見つからない場合は標準のインストール先を確認します。起動時に実行ファイルの場所、検出した WSL バージョン、`VirtualMachinePlatform` の状態を表示します。`wsl --version` が成功してもバージョンを読み取れない場合や、Windows 機能の状態が不明な場合は、自動インストールに進まず診断情報を表示して停止します。
+
+WSL が導入済みでも `VirtualMachinePlatform` が無効なら、DISM でその機能と必要な親機能を有効化します。WSL 本体の再インストールは行いません。DISM のログは一時フォルダーの `aicontainer-vmp-<ID>.log` に保存し、そのパスを表示します。有効化に成功したら終了コード `3010` で停止するので、Windows を再起動して同じコマンドを実行してください。スクリプトからは自動再起動しません。
 
 ```powershell
 # .aicontainer の tool 設定を使用。設定がなければ Claude Code
@@ -50,12 +52,12 @@ WSL の実行ファイルはターミナルの PATH を優先して探し、見�
 
 ドライブのルートから指定するときは、`-Workspace "C:\workspace\sample"` のように `C:` の直後に `\` を入れてください。`C:workspace\sample` は C ドライブの現在位置を基準とする相対パスなので、参照先が異なります。空白を含むパスは引用符で囲んでください。
 
-通常権限の PowerShell から実行してください。管理者権限へ昇格するのは WSL の導入・更新だけです。一般ユーザーと管理者の `wslc` は別のセッションを使うため、ビルドと起動は同じ権限で実行します。実行ポリシーの `Bypass` 指定はこの PowerShell プロセスだけに適用されます。
+通常権限の PowerShell から実行してください。管理者権限へ昇格するのは WSL の導入・更新と Windows 機能の有効化だけです。一般ユーザーと管理者の `wslc` は別のセッションを使うため、ビルドと起動は同じ権限で実行します。実行ポリシーの `Bypass` 指定はこの PowerShell プロセスだけに適用されます。
 
 ## 導入・ビルドだけを行う場合
 
 ```powershell
-.\install-wsl.ps1 -Target setup   # WSL の導入・更新だけ
+.\install-wsl.ps1 -Target setup   # WSL と Windows 機能を準備
 .\install-wsl.ps1                 # ベース・AI・Proxy をビルド
 .\install-wsl.ps1 -Target base
 .\install-wsl.ps1 -Target main
@@ -91,6 +93,14 @@ Windows のフォルダーはまず `wslc` で共有し、Docker の `inspect` �
 ## 前提と検証
 
 BIOS / UEFI のハードウェア仮想化が有効である必要があります。仮想マシン内では入れ子の仮想化も必要です。初回の導入・ビルドには WSL 配布元、コンテナレジストリ、既存 Dockerfile の apt / npm / GitHub / AI CLI 配布元への通信が必要です。
+
+`VirtualMachinePlatform` の有効化に失敗した場合は、表示された DISM ログを確認してください。操作結果をターミナルで確認するには、管理者として開いた PowerShell で次を実行します。既定のログ保存先は `%WINDIR%\Logs\DISM\dism.log` です。
+
+```powershell
+dism.exe /Online /Enable-Feature /FeatureName:VirtualMachinePlatform /All /NoRestart
+```
+
+成功後は Windows を再起動し、通常権限の PowerShell で起動スクリプトを再実行します。`wsl --version` は WSL 本体のバージョン確認であり、仮想化機能が動作することまでは確認しません。Windows サンドボックス内で失敗する場合は Windows ホスト側で実行してください。その他の仮想マシンでは、Windows 機能を追加できることと、ホストが入れ子の仮想化を許可していることを確認してください。
 
 `.gitattributes` で Linux 向けの Dockerfile とシェルスクリプトを LF に固定します。古い作業コピーに CRLF が残っていた場合は、ファイル名を表示して停止します。エディターで LF に変更するか、変更を退避して新しい作業コピーを取得してください。
 

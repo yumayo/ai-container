@@ -55,14 +55,14 @@ function Get-AiWslVersion {
     throw "Could not read the WSL version from: $Wsl --version. Output: $versionText"
 }
 
-function Invoke-AiWslSetupCommand {
+function Invoke-AiWslElevatedCommand {
     param(
-        [Parameter(Mandatory = $true)][string] $Wsl,
+        [Parameter(Mandatory = $true)][string] $Executable,
         [Parameter(Mandatory = $true)][string[]] $Arguments
     )
 
-    # Only WSL installation/update is elevated. Builds must stay in the calling
-    # user's session: elevated wslc uses a different image/container store.
+    # Only Windows feature setup and WSL installation/update are elevated.
+    # Builds stay in the calling user's session: elevated wslc has another store.
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     try {
         $principal = New-Object Security.Principal.WindowsPrincipal($identity)
@@ -71,15 +71,39 @@ function Invoke-AiWslSetupCommand {
         $identity.Dispose()
     }
     $options = @{
-        FilePath = $Wsl
+        FilePath = $Executable
         ArgumentList = $Arguments
         Wait = $true
         PassThru = $true
     }
     if (-not $isAdmin) { $options.Verb = 'RunAs' }
-    # Arguments here are fixed WSL switches, never user-supplied command text.
+    # Arguments are setup switches, never user-supplied command text.
     $process = Start-Process @options
     return $process.ExitCode
+}
+
+function Invoke-AiWslSetupCommand {
+    param(
+        [Parameter(Mandatory = $true)][string] $Wsl,
+        [Parameter(Mandatory = $true)][string[]] $Arguments
+    )
+    return Invoke-AiWslElevatedCommand -Executable $Wsl -Arguments $Arguments
+}
+
+function Enable-AiWslVirtualMachinePlatform {
+    # Installing the WSL application and enabling the Windows feature are
+    # separate operations. Do not reinstall an already detected WSL package.
+    $dism = Join-Path $env:SystemRoot 'System32\dism.exe'
+    $log = Join-Path ([IO.Path]::GetTempPath()) ('aicontainer-vmp-' + [guid]::NewGuid().ToString('N') + '.log')
+    Write-Host 'Enabling VirtualMachinePlatform with DISM. Windows may request administrator access.'
+    Write-Host "DISM log: $log"
+    # Start-Process joins ArgumentList; quote the log path for spaces in TEMP.
+    $arguments = @('/Online', '/Enable-Feature', '/FeatureName:VirtualMachinePlatform', '/All', '/NoRestart',
+        "/LogPath:`"$log`"")
+    $code = Invoke-AiWslElevatedCommand -Executable $dism -Arguments $arguments
+    if ($code -notin @(0, 3010)) {
+        throw "Enabling VirtualMachinePlatform failed (exit $code). DISM log: $log. See docs/WSL.md for diagnostics."
+    }
 }
 
 function Get-AiWslVirtualMachineState {
@@ -103,13 +127,8 @@ function Initialize-AiWsl {
     if ($featureState -notin @(1, 2, 3)) {
         throw 'Could not determine whether VirtualMachinePlatform is enabled. WSL setup was not started.'
     }
-    $featureEnabled = $featureState -eq 1
-    if (-not $version -or -not $featureEnabled) {
-        if (-not $featureEnabled) {
-            Write-Host 'Enabling VirtualMachinePlatform through WSL setup. Windows may request administrator access.'
-        } else {
-            Write-Host 'Installing WSL without an Ubuntu distribution. Windows may request administrator access.'
-        }
+    if (-not $version) {
+        Write-Host 'Installing WSL without an Ubuntu distribution. Windows may request administrator access.'
         $arguments = @('--install', '--no-distribution')
         if ($WebDownload) { $arguments += '--web-download' }
         $code = Invoke-AiWslSetupCommand $wsl $arguments
@@ -117,6 +136,14 @@ function Initialize-AiWsl {
             throw "WSL installation failed (exit $code). See the WSL installer output."
         }
         # A first install can return zero even when a reboot is required.
+        Write-Host 'Restart Windows, then run the same command again. No automatic reboot will occur.'
+        return [pscustomobject] @{ ExitCode = 3010; Wslc = $null }
+    }
+
+    if ($featureState -ne 1) {
+        Enable-AiWslVirtualMachinePlatform
+        # DISM may return zero before a reboot. Do not build or start containers
+        # in the same invocation that enabled the virtualization platform.
         Write-Host 'Restart Windows, then run the same command again. No automatic reboot will occur.'
         return [pscustomobject] @{ ExitCode = 3010; Wslc = $null }
     }
