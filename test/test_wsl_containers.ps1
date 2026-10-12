@@ -4,6 +4,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '../scripts/wsl-containers.ps1')
 
 $originalProbe = ${function:Get-AiWslVersion}
+$originalFind = ${function:Find-AiWslExecutable}
 $originalCommand = ${function:Invoke-AiWslCommand}
 $script:checks = 0
 $script:calls = New-Object 'System.Collections.Generic.List[object]'
@@ -101,6 +102,16 @@ $null = New-Item -ItemType Directory -Path $proxyContext -Force
 [IO.File]::WriteAllText((Join-Path $proxyContext 'Dockerfile'), "# LF fixture`n")
 [IO.File]::WriteAllText((Join-Path $proxyContext 'entrypoint.sh'), "# LF fixture`n")
 try {
+    # A working terminal command must take precedence over another installed copy.
+    & {
+        function Get-Command {
+            param($Name, $CommandType, $ErrorAction)
+            return [pscustomobject] @{ Source = 'C:\Windows\System32\wsl.exe' }
+        }
+        function Test-Path { throw 'Fixed paths must not override the terminal executable.' }
+        Assert-True ((& $originalFind 'wsl.exe') -eq 'C:\Windows\System32\wsl.exe') 'Reuse the executable resolved by the terminal.'
+    }
+
     Reset-Fixture
     $script:version = $null
     $script:featureState = 2
@@ -127,6 +138,23 @@ try {
     $result = Initialize-AiWsl
     Assert-True ($result.ExitCode -eq 0) 'Existing GA installation must be reusable.'
     Assert-True ($script:calls.Count -eq 1 -and $script:calls[0].Kind -eq 'wslc') 'Do not elevate or update on every invocation.'
+
+    foreach ($state in @(4, $null)) {
+        Reset-Fixture
+        $script:featureState = $state
+        Assert-Throws { Initialize-AiWsl } 'Could not determine whether VirtualMachinePlatform is enabled'
+        Assert-True ($script:calls.Count -eq 0) 'An unknown feature state must not trigger installation.'
+    }
+
+    & {
+        Reset-Fixture
+        function Get-AiWslVersion {
+            param([string] $Wsl)
+            throw 'Could not read the WSL version'
+        }
+        Assert-Throws { Initialize-AiWsl } 'Could not read the WSL version'
+        Assert-True ($script:calls.Count -eq 0) 'A version parsing error must not trigger installation.'
+    }
 
     Reset-Fixture
     $script:version = [version] '2.9.3'
@@ -241,6 +269,22 @@ try {
     }
     $version = & $originalProbe 'Test-VersionOutput'
     Assert-True ($version -eq [version] '3.0.1.0') 'Read WSL version rather than kernel version.'
+    function Test-LocalizedVersionOutput {
+        param([string] $Unused)
+        $global:LASTEXITCODE = 0
+        # Japanese "version", keeping this source ASCII for Windows PowerShell 5.1.
+        $label = -join (0x30D0, 0x30FC, 0x30B8, 0x30E7, 0x30F3 | ForEach-Object { [char] $_ })
+        $text = "WSL ${label}: 3.0.1.0`r`nKernel: 6.18.40.1-1`r`n"
+        # WSL's redirected UTF-16 text can arrive with embedded NUL characters.
+        return ($text.ToCharArray() -join [string][char]0)
+    }
+    Assert-True ((& $originalProbe 'Test-LocalizedVersionOutput') -eq [version] '3.0.1.0') 'Read localized output containing NULs.'
+    function Test-UnreadableVersionOutput {
+        param([string] $Unused)
+        $global:LASTEXITCODE = 0
+        'Unexpected version output'
+    }
+    Assert-Throws { & $originalProbe 'Test-UnreadableVersionOutput' } 'Could not read the WSL version'
     function Test-VersionFailure {
         param([string] $Unused)
         $global:LASTEXITCODE = 1

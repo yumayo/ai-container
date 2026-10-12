@@ -28,6 +28,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start-wsl.ps1 -Workspa
 
 導入済みの WSL が古ければ `wsl --update` を実行します。プレビュー版は要求せず、安定版の WSL 3.0.1 以降を使用します。初回インストール時や更新が再起動を要求した場合は終了コード `3010` で停止します。自動再起動やログオン時の自動実行は登録しません。
 
+WSL の実行ファイルはターミナルの PATH を優先して探し、見つからない場合は標準のインストール先を確認します。起動時に実行ファイルの場所、検出した WSL バージョン、`VirtualMachinePlatform` の状態を表示します。`wsl --version` が成功してもバージョンを読み取れない場合や、Windows 機能の状態が不明な場合は、自動インストールに進まず診断情報を表示して停止します。WSL が導入済みでも `VirtualMachinePlatform` が無効なら、その機能を有効にするためのセットアップが必要です。
+
 ```powershell
 # .aicontainer の tool 設定を使用。設定がなければ Claude Code
 .\start-wsl.ps1 -Workspace C:\src\my-project

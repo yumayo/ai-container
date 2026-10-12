@@ -14,6 +14,10 @@ function Assert-AiWslPlatform {
 function Find-AiWslExecutable {
     param([Parameter(Mandatory = $true)][string] $Name)
 
+    # Use the same executable as the calling terminal before trying fixed paths.
+    $command = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+
     # An installation can finish before the current terminal's PATH is refreshed.
     $candidates = @(
         (Join-Path $env:ProgramFiles "WSL\$Name"),
@@ -24,8 +28,6 @@ function Find-AiWslExecutable {
             return $candidate
         }
     }
-    $command = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue
-    if ($command) { return $command.Source }
     return $null
 }
 
@@ -37,13 +39,18 @@ function Get-AiWslVersion {
     $ErrorActionPreference = 'Continue'
     $PSNativeCommandUseErrorActionPreference = $false
     $output = & $Wsl --version 2>$null
-    if ($LASTEXITCODE -ne 0) { return $null }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "WSL version probe failed (exit $LASTEXITCODE): $Wsl --version"
+        return $null
+    }
     $versionText = ($output -join "`n").Replace([string][char]0, '')
     # The first version is WSL itself; subsequent lines describe the kernel etc.
     if ($versionText -match '(?m)^.*?(\d+\.\d+\.\d+(?:\.\d+)?).*?$') {
         return [version] $Matches[1]
     }
-    return $null
+    # Successful but unreadable output is a detection error, not proof that WSL
+    # is missing. Never start an elevated installation just because parsing failed.
+    throw "Could not read the WSL version from: $Wsl --version. Output: $versionText"
 }
 
 function Invoke-AiWslSetupCommand {
@@ -86,10 +93,21 @@ function Initialize-AiWsl {
     if (-not $wsl) {
         throw 'wsl.exe was not found. Update Windows 11 before running this installer.'
     }
+    Write-Host "Using WSL executable: $wsl"
     $version = Get-AiWslVersion $wsl
-    $featureEnabled = (Get-AiWslVirtualMachineState) -eq 1
+    if ($version) { Write-Host "Detected WSL version: $version" }
+    $featureState = Get-AiWslVirtualMachineState
+    Write-Host "VirtualMachinePlatform state: $featureState (1=enabled, 2=disabled, 3=absent, 4=unknown)"
+    if ($featureState -notin @(1, 2, 3)) {
+        throw 'Could not determine whether VirtualMachinePlatform is enabled. WSL setup was not started.'
+    }
+    $featureEnabled = $featureState -eq 1
     if (-not $version -or -not $featureEnabled) {
-        Write-Host 'Installing WSL without an Ubuntu distribution. Windows may request administrator access.'
+        if (-not $featureEnabled) {
+            Write-Host 'Enabling VirtualMachinePlatform through WSL setup. Windows may request administrator access.'
+        } else {
+            Write-Host 'Installing WSL without an Ubuntu distribution. Windows may request administrator access.'
+        }
         $arguments = @('--install', '--no-distribution')
         if ($WebDownload) { $arguments += '--web-download' }
         $code = Invoke-AiWslSetupCommand $wsl $arguments
