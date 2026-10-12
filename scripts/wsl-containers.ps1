@@ -261,7 +261,7 @@ function Invoke-AiWslInteractive {
     param([string] $Wslc, [string] $Name)
     $PSNativeCommandUseErrorActionPreference = $false
     # session run provides pipes, not a PTY. Use the native container terminal
-    # for the runner created through Docker. Do not capture/pipe this output.
+    # for the runner created through wslc. Do not capture/pipe this output.
     Write-Host "Starting interactive launcher: $Name"
     & $Wslc start --attach --interactive $Name
     $script:AiWslExitCode = $LASTEXITCODE
@@ -307,6 +307,7 @@ function Start-AiWslContainer {
     $docker = @('system', 'session', 'run', 'docker')
     $carrierCreated = $false
     $runnerCreated = $false
+    $createdVolumes = New-Object 'System.Collections.Generic.List[string]'
     $script:AiWslExitCode = 1
     try {
         # Prove that the bundled engine accepts the required capabilities.
@@ -332,22 +333,48 @@ function Start-AiWslContainer {
         $repositorySource = Get-AiWslMountSource $inspection[0].Mounts '/aicontainer/repository'
         $socketGroup = (Read-AiWslCommand $Wslc @('system', 'session', 'run', 'stat', '-c', '%g', '/var/run/docker.sock')).Trim()
         if ($socketGroup -notmatch '^\d+$') { throw 'Could not determine the bundled Docker socket group.' }
+        $launcherUser = (Read-AiWslCommand $Wslc ($docker + @(
+            'run', '--rm', '--network', 'none', '--entrypoint', 'id', 'yumayo-ai-base', '-u', 'ubuntu'
+        ))).Trim()
+        if ($launcherUser -notmatch '^\d+$') { throw 'Could not determine the launcher user ID.' }
 
         # The launcher and daemon must see identical paths for all bind mounts,
         # including the legacy launcher's read-only firewall snapshots in /tmp.
-        # Only this trusted launcher has the raw engine socket. The AI container
-        # is created by .bash_ai_container with its existing restrictions.
-        $arguments = $docker + @(
-            'create', '--name', $runner, '--interactive', '--tty', '--network', 'none',
-            '--user', 'ubuntu', '--group-add', $socketGroup, '--label', $owner,
-            '--env', 'DOCKER_HOST=unix:///var/run/docker.sock', '--env', 'TERM=xterm-256color',
-            '--mount', 'type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock',
-            '--mount', 'type=bind,source=/tmp,target=/tmp',
-            '--mount', "type=bind,source=$workspaceSource,target=$workspaceSource"
+        # wslc interprets bind sources as Windows paths. Local-driver volumes
+        # refer to the existing VM directories without another path translation.
+        # A volume root must be a directory, so expose the socket's parent at a
+        # separate, read-only path rather than overlaying the launcher's /run.
+        $bindings = @(
+            @{ Name = "yumayo-ai-engine-$runId"; Source = '/var/run'; Target = '/var/run/aicontainer-engine'; ReadOnly = $true },
+            @{ Name = "yumayo-ai-tmp-$runId"; Source = '/tmp'; Target = '/tmp'; ReadOnly = $false },
+            @{ Name = "yumayo-ai-workspace-$runId"; Source = $workspaceSource; Target = $workspaceSource; ReadOnly = $false }
         )
         if ($repositorySource -ne $workspaceSource) {
-            $arguments += @('--mount', "type=bind,source=$repositorySource,target=$repositorySource,readonly")
+            $bindings += @{ Name = "yumayo-ai-repository-$runId"; Source = $repositorySource; Target = $repositorySource; ReadOnly = $true }
         }
+        $mountArguments = @()
+        foreach ($binding in $bindings) {
+            Invoke-AiWslCommand $Wslc ($docker + @(
+                'volume', 'create', '--driver', 'local', '--label', $owner,
+                '--opt', 'type=none', '--opt', 'o=bind', '--opt', "device=$($binding.Source)", $binding.Name
+            ))
+            $createdVolumes.Add($binding.Name)
+            # Do not copy image contents into the existing VM directories.
+            $mount = "type=volume,source=$($binding.Name),target=$($binding.Target),volume-nocopy"
+            if ($binding.ReadOnly) { $mount += ',readonly' }
+            $mountArguments += @('--mount', $mount)
+        }
+
+        # Only this trusted launcher has the raw engine socket. The AI container
+        # is created by .bash_ai_container with its existing restrictions.
+        # Use wslc for both creation and attachment so it owns the lifecycle.
+        # wslc has no --group-add; keep ubuntu's UID and use the socket's GID.
+        # A distinct launcher label keeps Docker-only child cleanup away from it.
+        $arguments = @(
+            'create', '--name', $runner, '--interactive', '--tty', '--network', 'none',
+            '--user', "${launcherUser}:$socketGroup", '--label', "io.yumayo.aicontainer.wsl-launch=$runId",
+            '--env', 'DOCKER_HOST=unix:///var/run/aicontainer-engine/docker.sock', '--env', 'TERM=xterm-256color'
+        ) + $mountArguments
         $arguments += @('yumayo-ai-base', 'bash', "$repositorySource/scripts/wsl-launch.sh",
             $repositorySource, $workspaceSource, $runId)
         if ($Tool) { $arguments += $Tool }
@@ -358,7 +385,7 @@ function Start-AiWslContainer {
         # Stop the trusted launcher first so it cannot create another child
         # between querying and removing this invocation's AI containers.
         if ($runnerCreated) {
-            try { Invoke-AiWslCommand $Wslc ($docker + @('rm', '--force', $runner)) }
+            try { Invoke-AiWslCommand $Wslc @('rm', '--force', $runner) }
             catch { Write-Warning "Could not remove launcher ${runner}: $_" }
         }
         try {
@@ -375,6 +402,12 @@ function Start-AiWslContainer {
                 }
             }
         } catch { Write-Warning "Could not clean up AI resources for ${runId}: $_" }
+        # Remove only volumes successfully created by this invocation. Removing
+        # these local bind volumes releases mounts; it does not delete source files.
+        foreach ($volume in $createdVolumes) {
+            try { Invoke-AiWslCommand $Wslc ($docker + @('volume', 'rm', $volume)) }
+            catch { Write-Warning "Could not remove launcher volume ${volume}: $_" }
+        }
         if ($carrierCreated) {
             try { Invoke-AiWslCommand $Wslc @('rm', '--force', $carrier) }
             catch { Write-Warning "Could not release Windows shares ${carrier}: $_" }

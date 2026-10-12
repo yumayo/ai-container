@@ -11,7 +11,7 @@ Windows の起動スクリプト
 
 起動用コンテナが内蔵 Docker に AI コンテナの作成を依頼します。起動用コンテナの中で別の Docker デーモンを動かす構成ではありません。AI コンテナへ直接渡す Docker ソケットは従来どおり、設定した場合の制限付き Docker Socket Proxy だけです。
 
-**実験的な対応です。Windows 実機での導入・ビルド・対話起動は未検証です。** `wslc system session run docker ...` で内蔵エンジンを直接操作するため、WSL Containers の内部実装に依存します。通常の `wslc run` の機能だけで動く構成としては扱わないでください。
+**実験的な対応です。Windows 実機で AI の対話起動が完了することは未確認です。** WSL 3.0.1 の実機では内蔵 Docker の応答、必要な権限の確認、Windows フォルダーの共有まで確認しています。`wslc system session run docker ...` で内蔵エンジンを直接操作するため、WSL Containers の内部実装に依存します。通常の `wslc run` の機能だけで動く構成としては扱わないでください。
 
 ## 使い方
 
@@ -76,9 +76,13 @@ wslc image list
 
 Windows のフォルダーはまず `wslc` で共有し、Docker の `inspect` が返す VM 側のパスを使います。Windows の `C:\...` を Docker デーモンへそのまま渡したり、`/mnt/c` の存在を仮定したりしません。起動用コンテナと内蔵 Docker で同じパスを使うことで、既存ランチャーが作るマウントや許可設定の読み取り専用コピーを利用します。
 
-`system session run` は対話用 TTY を作らないため、起動用コンテナを内蔵 Docker で作成し、`wslc start --attach --interactive` で端末を接続します。起動用コンテナはイメージの `ubuntu` ユーザーで動かし、セッションファイルの所有者を AI とそろえます。
+`system session run` は対話用 TTY を作らないため、起動用コンテナは `wslc create --interactive --tty` で作成し、`wslc start --attach --interactive` で端末を接続します。作成・開始・削除を `wslc` にそろえます。以前の「内蔵 Docker で作成し、`wslc` で開始する」方式では、実機で `E_UNEXPECTED` が発生し、コンテナが `created` のまま残りました。
 
-終了時は、その起動で作成した起動用コンテナ・AI コンテナ・専用ネットワーク・フォルダー共有用コンテナを後始末します。所有者ラベルで対象を絞り、他のコンテナ、追加ネットワーク、継続利用する Proxy は削除しません。Windows 自体の強制終了などで後始末できない場合は、`wslc container list --all` で `yumayo-ai-share-*` / `yumayo-ai-launch-*` を確認できます。
+`wslc` に VM 内のパスを Windows のパスとして解釈させないよう、内蔵 Docker の `local` ドライバーで既存の VM ディレクトリを参照する一時ボリュームを作り、起動用コンテナには名前付きボリュームとして渡します。ワークスペース、リポジトリ、`/tmp` は VM と同じパスにマウントします。`volume-nocopy` でイメージからの書き込みを防ぎ、リポジトリはワークスペースと同じ共有元の場合を除いて読み取り専用です。
+
+起動用コンテナには、内蔵 Docker の `/var/run` を専用の読み取り専用パス `/var/run/aicontainer-engine` にマウントし、その中の `docker.sock` を `DOCKER_HOST` に指定します。このディレクトリと生の Docker ソケットを AI コンテナに渡すことはありません。起動用コンテナの UID はイメージの `ubuntu` から取得し、AI とセッションファイルの所有者をそろえます。`wslc create` に `--group-add` がないため、GID には Docker ソケットの実際のグループ ID を指定します。
+
+終了時は、その起動で作成した起動用コンテナ・AI コンテナ・専用ネットワーク・一時ボリューム・フォルダー共有用コンテナの順に後始末します。途中でボリューム作成に失敗した場合も、作成済みのものを回収します。ボリュームは既存ディレクトリへのバインドなので、削除しても Windows 側の作業ファイルは残ります。AI と専用ネットワークは所有者ラベル、一時ボリュームは作成時に記録した名前で対象を絞ります。起動用コンテナには別のラベルを付け、削除は `wslc` だけで行います。他のコンテナ、追加ネットワーク、継続利用する Proxy は削除しません。Windows 自体の強制終了などで後始末できない場合は、`wslc container list --all` で `yumayo-ai-share-*` / `yumayo-ai-launch-*`、`wslc system session run docker volume ls` で `yumayo-ai-engine-*` / `yumayo-ai-tmp-*` / `yumayo-ai-workspace-*` / `yumayo-ai-repository-*` を確認できます。
 
 `Starting interactive launcher` の後で失敗した場合は、起動用コンテナの作成後、端末の接続または起動したプロセスで失敗しています。削除する前に Docker の実行状態を `Launcher state before cleanup` として表示します。`Status=created` ならコンテナ内の起動処理はまだ始まっていません。`E_UNEXPECTED` だけでは原因を特定できないため、WSL 側の終了コードとこの状態を合わせて確認してください。診断のために読み取る情報は `.State` に限定し、環境変数を含む inspect 全体は表示しません。
 
@@ -135,7 +139,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\test\test_wsl_containe
 python3 -m unittest discover -s test -p 'test_*.py'
 ```
 
-実機では未導入時の UAC・再起動、旧版からの更新、イメージビルド、内蔵 Docker で作成したコンテナへの `wslc` の端末接続、ファイアウォールの疎通検証、セッションの保存、終了時の後始末を確認する必要があります。
+実機では未導入時の UAC・再起動、旧版からの更新、イメージビルド、一時ボリュームを介した VM パスの共有、`wslc` で作成した起動用コンテナへの端末接続、ファイアウォールの疎通検証、セッションの保存、終了時の後始末を通して確認する必要があります。
 
 ## WSL の導入を繰り返し検証する
 
