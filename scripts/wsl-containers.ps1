@@ -338,6 +338,17 @@ function Start-AiWslContainer {
         ))).Trim()
         if ($launcherUser -notmatch '^\d+$') { throw 'Could not determine the launcher user ID.' }
 
+        # wslc does not support volume-nocopy. The generated share paths and
+        # dedicated socket target do not exist in the base image; /tmp does.
+        # Reject image contents there before Docker can copy them into VM /tmp.
+        $imageTemporaryEntry = Read-AiWslCommand $Wslc ($docker + @(
+            'run', '--rm', '--network', 'none', '--user', '0', '--entrypoint', 'find',
+            'yumayo-ai-base', '/tmp', '-mindepth', '1', '-maxdepth', '1', '-print', '-quit'
+        ))
+        if ($imageTemporaryEntry) {
+            throw 'The base image /tmp is not empty. WSL Containers cannot disable volume copy-up. Remove temporary build files from yumayo-ai-base before retrying.'
+        }
+
         # The launcher and daemon must see identical paths for all bind mounts,
         # including the legacy launcher's read-only firewall snapshots in /tmp.
         # wslc interprets bind sources as Windows paths. Local-driver volumes
@@ -359,8 +370,7 @@ function Start-AiWslContainer {
                 '--opt', 'type=none', '--opt', 'o=bind', '--opt', "device=$($binding.Source)", $binding.Name
             ))
             $createdVolumes.Add($binding.Name)
-            # Do not copy image contents into the existing VM directories.
-            $mount = "type=volume,source=$($binding.Name),target=$($binding.Target),volume-nocopy"
+            $mount = "type=volume,source=$($binding.Name),target=$($binding.Target)"
             if ($binding.ReadOnly) { $mount += ',readonly' }
             $mountArguments += @('--mount', $mount)
         }

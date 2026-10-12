@@ -37,6 +37,7 @@ function Reset-Fixture {
     $script:badMount = $false
     $script:sameMount = $false
     $script:launcherUser = '1000'
+    $script:imageTemporaryEntry = ''
     $script:failRunnerCreate = $false
     $script:failVolumeCreateAt = 0
     $script:volumeCreateCount = 0
@@ -108,6 +109,7 @@ function Read-AiWslCommand {
     }
     if ($Arguments -contains 'stat') { return '998' }
     if ($Arguments -contains 'id') { return $script:launcherUser }
+    if ($Arguments -contains 'find') { return $script:imageTemporaryEntry }
     if ($Arguments -contains 'ps') { return '123456789abc' }
     if ($Arguments -contains 'ls') { return 'abcdef123456' }
     throw "Unexpected read: $Arguments"
@@ -314,8 +316,11 @@ try {
         foreach ($value in @('local', 'type=none', 'o=bind', "device=$($binding.Source)", "io.yumayo.aicontainer.wsl-run=$runId")) {
             Assert-True ($volume[0].Arguments -contains $value) "Use an owned bind volume with $value."
         }
-        Assert-True ($arguments -contains "type=volume,source=$name,target=$($binding.Target),volume-nocopy$($binding.Suffix)") 'Preserve VM paths and read-only access without copying image contents into source directories.'
+        Assert-True ($arguments -contains "type=volume,source=$name,target=$($binding.Target)$($binding.Suffix)") 'Preserve VM paths and read-only access with supported mount options.'
     }
+    Assert-True (@($arguments | Where-Object { $_ -like '*volume-nocopy*' }).Count -eq 0) 'Never pass unsupported volume-nocopy to wslc.'
+    $temporaryCheck = @($script:calls | Where-Object { $_.Arguments -contains 'find' })
+    Assert-True ($temporaryCheck.Count -eq 1 -and $temporaryCheck[0].Arguments -contains '/tmp' -and -not ($temporaryCheck[0].Arguments -contains '--mount')) 'Check image temporary files without mounting any VM or workspace directory.'
     Assert-True (@($arguments | Where-Object { $_ -like 'type=bind,*' }).Count -eq 0) 'Never ask native wslc to translate VM bind paths as Windows paths.'
     Assert-True ($arguments[-1] -eq 'codex') 'Preserve tool selection.'
     Assert-True (-not ($arguments -contains '--privileged')) 'The launcher does not need a privileged container.'
@@ -358,6 +363,13 @@ try {
     Assert-Throws { Start-AiWslContainer -Wslc 'wslc.exe' -Repository $temporary -Workspace $temporary } 'launcher user ID'
     Assert-True ($script:volumeCreateCount -eq 0) 'Invalid user identity must stop before creating volumes.'
     Assert-True (@($script:calls | Where-Object { $_.Kind -eq 'interactive' }).Count -eq 0) 'Never attach with an invalid user identity.'
+
+    Reset-Fixture
+    $script:imageTemporaryEntry = '/tmp/build-artifact'
+    Assert-Throws { Start-AiWslContainer -Wslc 'wslc.exe' -Repository $temporary -Workspace $temporary } 'base image /tmp is not empty'
+    Assert-True ($script:volumeCreateCount -eq 0) 'Reject image temporary files before mounting VM directories as volumes.'
+    Assert-True (@($script:calls | Where-Object { ($_.Arguments -join ' ') -match '^create --name yumayo-ai-launch-' }).Count -eq 0) 'Do not create a launcher that could copy image files into VM /tmp.'
+    Assert-True (($script:calls[-1].Arguments -join ' ') -match '^rm --force yumayo-ai-share-') 'Release shares when image copy-up cannot be avoided.'
 
     foreach ($failureAt in @(1, 3)) {
         Reset-Fixture
