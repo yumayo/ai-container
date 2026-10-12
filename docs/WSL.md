@@ -46,6 +46,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start-wsl.ps1 -Workspa
 
 `-Workspace` は既存のディレクトリを指定します。省略時は現在のディレクトリを使います。認証情報と履歴は、そのプロジェクトの `.claude.local` / `.codex.local` に保存します。イメージがそろっている場合、次回起動ではビルドを省略します。
 
+ドライブのルートから指定するときは、`-Workspace "C:\workspace\sample"` のように `C:` の直後に `\` を入れてください。`C:workspace\sample` は C ドライブの現在位置を基準とする相対パスなので、参照先が異なります。空白を含むパスは引用符で囲んでください。
+
 通常権限の PowerShell から実行してください。管理者権限へ昇格するのは WSL の導入・更新だけです。一般ユーザーと管理者の `wslc` は別のセッションを使うため、ビルドと起動は同じ権限で実行します。実行ポリシーの `Bypass` 指定はこの PowerShell プロセスだけに適用されます。
 
 ## 導入・ビルドだけを行う場合

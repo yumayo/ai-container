@@ -18,6 +18,10 @@ try {
     . (Join-Path $PSScriptRoot 'scripts/wsl-containers.ps1')
     Assert-AiWslPlatform
     if (-not (Test-Path -LiteralPath $Workspace -PathType Container)) {
+        if ($Workspace -match '^[A-Za-z]:(?![\\/])') {
+            $absoluteExample = $Workspace.Insert(2, '\')
+            throw "Workspace does not exist: $Workspace. This is a drive-relative path. If you meant a path from the drive root, use: $absoluteExample"
+        }
         throw "Workspace does not exist: $Workspace"
     }
     $result = Initialize-AiWsl -WebDownload:$WebDownload
