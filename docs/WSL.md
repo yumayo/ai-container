@@ -78,11 +78,15 @@ Windows のフォルダーはまず `wslc` で共有し、Docker の `inspect` �
 
 `system session run` は対話用 TTY を作らないため、起動用コンテナは `wslc create --interactive --tty` で作成し、`wslc start --attach --interactive` で端末を接続します。作成・開始・削除を `wslc` にそろえます。以前の「内蔵 Docker で作成し、`wslc` で開始する」方式では、実機で `E_UNEXPECTED` が発生し、コンテナが `created` のまま残りました。
 
-`wslc` に VM 内のパスを Windows のパスとして解釈させないよう、内蔵 Docker の `local` ドライバーで既存の VM ディレクトリを参照する一時ボリュームを作り、起動用コンテナには名前付きボリュームとして渡します。ワークスペース、リポジトリ、`/tmp` は VM と同じパスにマウントします。`wslc` が未対応の `volume-nocopy` は指定しません。共有パスと Docker ソケット用のマウント先はベースイメージ内にない専用パスを使います。イメージ内にも存在する `/tmp` は、コピー対象のファイルがないことを起動前に確認し、残っていれば停止します。その場合は、ベースイメージ内の一時的なビルド生成物を除去してから再実行してください。リポジトリはワークスペースと同じ共有元の場合を除いて読み取り専用です。
+`wslc` に VM 内のパスを Windows のパスとして解釈させないよう、内蔵 Docker の `local` ドライバーで既存の VM ディレクトリを参照する一時ボリュームを作り、起動用コンテナには名前付きボリュームとして渡します。ワークスペースとリポジトリは VM と同じパスにマウントします。リポジトリはワークスペースと同じ共有元の場合を除いて読み取り専用です。
+
+IP・DNS 許可設定の一時ファイルには、起動ごとに作る専用の Docker ボリューム `yumayo-ai-tmp-<ID>` を使います。その `Mountpoint` を取得して起動用コンテナにも同じパスでマウントし、`AICONTAINER_RUNTIME_ROOT` で Bash ランチャーに伝えます。起動用ユーザーだけが読み書きできるよう、準備用の Docker コンテナで所有者とモード `0700` を設定します。通常の Bash 起動では従来どおり `/tmp` を使います。
+
+`wslc` が未対応の `volume-nocopy` は、`wslc create` には渡しません。準備用コンテナを内蔵 Docker で実行するときだけ指定します。WSL 側のマウント先にはベースイメージ内にない専用パスを使うため、イメージ内のファイルをコピーする必要がありません。ベースイメージの `/tmp` は共有せず、内容の削除や空であることの確認も不要です。
 
 起動用コンテナには、内蔵 Docker の `/var/run` を専用の読み取り専用パス `/var/run/aicontainer-engine` にマウントし、その中の `docker.sock` を `DOCKER_HOST` に指定します。このディレクトリと生の Docker ソケットを AI コンテナに渡すことはありません。起動用コンテナの UID はイメージの `ubuntu` から取得し、AI とセッションファイルの所有者をそろえます。`wslc create` に `--group-add` がないため、GID には Docker ソケットの実際のグループ ID を指定します。
 
-終了時は、その起動で作成した起動用コンテナ・AI コンテナ・専用ネットワーク・一時ボリューム・フォルダー共有用コンテナの順に後始末します。途中でボリューム作成に失敗した場合も、作成済みのものを回収します。ボリュームは既存ディレクトリへのバインドなので、削除しても Windows 側の作業ファイルは残ります。AI と専用ネットワークは所有者ラベル、一時ボリュームは作成時に記録した名前で対象を絞ります。起動用コンテナには別のラベルを付け、削除は `wslc` だけで行います。他のコンテナ、追加ネットワーク、継続利用する Proxy は削除しません。Windows 自体の強制終了などで後始末できない場合は、`wslc container list --all` で `yumayo-ai-share-*` / `yumayo-ai-launch-*`、`wslc system session run docker volume ls` で `yumayo-ai-engine-*` / `yumayo-ai-tmp-*` / `yumayo-ai-workspace-*` / `yumayo-ai-repository-*` を確認できます。
+終了時は、その起動で作成した起動用コンテナ・AI コンテナ・専用ネットワーク・一時ボリューム・フォルダー共有用コンテナの順に後始末します。途中でボリューム作成に失敗した場合も、作成済みのものを回収します。専用の一時ファイル用ボリュームの削除では、残っている許可設定のコピーも削除します。共有用ボリュームは既存ディレクトリへのバインドなので、削除しても Windows 側の作業ファイルは残ります。AI と専用ネットワークは所有者ラベル、一時ボリュームは作成時に記録した名前で対象を絞ります。起動用コンテナには別のラベルを付け、削除は `wslc` だけで行います。他のコンテナ、追加ネットワーク、継続利用する Proxy は削除しません。Windows 自体の強制終了などで後始末できない場合は、`wslc container list --all` で `yumayo-ai-share-*` / `yumayo-ai-launch-*`、`wslc system session run docker volume ls` で `yumayo-ai-engine-*` / `yumayo-ai-tmp-*` / `yumayo-ai-workspace-*` / `yumayo-ai-repository-*` を確認できます。
 
 `Starting interactive launcher` の後で失敗した場合は、起動用コンテナの作成後、端末の接続または起動したプロセスで失敗しています。削除する前に Docker の実行状態を `Launcher state before cleanup` として表示します。`Status=created` ならコンテナ内の起動処理はまだ始まっていません。`E_UNEXPECTED` だけでは原因を特定できないため、WSL 側の終了コードとこの状態を合わせて確認してください。診断のために読み取る情報は `.State` に限定し、環境変数を含む inspect 全体は表示しません。
 

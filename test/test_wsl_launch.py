@@ -87,3 +87,23 @@ class WslLaunchTest(unittest.TestCase):
         result = self.launch(run_id="bad;id")
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.root / "docker-events.jsonl").exists())
+
+    def test_private_runtime_volume_preserves_snapshots_and_cleanup(self):
+        # Model a separate VM volume with a path that needs shell quoting.
+        runtime = self.root / 'runtime $(touch injected)'
+        runtime.mkdir(mode=0o700)
+        self.env["AICONTAINER_RUNTIME_ROOT"] = str(runtime)
+        self.env["DNS_CONFIG_TEST_EXIT"] = "17"
+        self.config.write_text("allow-dns=api.example.org\nallow-ip=192.168.1.2\n")
+        result = self.launch("codex")
+        self.assertEqual(result.returncode, 17, result.stdout + result.stderr)
+        record = json.loads(self.calls.read_text())
+        self.assertEqual(record["names"], ["api.example.org"])
+        self.assertEqual(record["ips"], ["192.168.1.2"])
+        self.assertTrue(record["readonly"] and record["ip_readonly"])
+        for key in ("snapshot", "ip_snapshot"):
+            path = Path(record[key])
+            self.assertEqual(path.parent.parent, runtime)
+            self.assertFalse(path.parent.exists())
+        self.assertEqual(list(runtime.iterdir()), [])
+        self.assertFalse((self.root / "injected").exists())

@@ -37,7 +37,8 @@ function Reset-Fixture {
     $script:badMount = $false
     $script:sameMount = $false
     $script:launcherUser = '1000'
-    $script:imageTemporaryEntry = ''
+    $script:badRuntimePath = $false
+    $script:failRuntimeInit = $false
     $script:failRunnerCreate = $false
     $script:failVolumeCreateAt = 0
     $script:volumeCreateCount = 0
@@ -81,6 +82,7 @@ function Invoke-AiWslCommand {
         Kind = 'wslc'; Arguments = $Arguments; Directory = (Get-Location).Path
     })
     if ($script:failImage -and $Arguments -contains $script:failImage) { throw 'Build failed' }
+    if ($script:failRuntimeInit -and $Arguments -contains 'install') { throw 'Runtime initialization failed' }
     if ($script:failCarrierStart -and $Arguments[0] -eq 'start') { throw 'Share start failed' }
     if ($script:failRunnerCreate -and $Arguments[0] -eq 'create' -and $Arguments[2] -like 'yumayo-ai-launch-*') {
         throw 'Launcher create failed'
@@ -97,6 +99,10 @@ function Invoke-AiWslCommand {
 function Read-AiWslCommand {
     param([string] $Wslc, [string[]] $Arguments)
     $script:calls.Add([pscustomobject] @{ Kind = 'read'; Arguments = $Arguments })
+    if ($Arguments -contains 'volume' -and $Arguments -contains 'inspect') {
+        if ($script:badRuntimePath) { return '/var/lib/docker/volumes/../unrelated/_data' }
+        return "/var/lib/docker/volumes/$($Arguments[-1])/_data"
+    }
     if ($Arguments -contains 'inspect') {
         $workspaceSource = '/mnt/workspace-share'
         if ($script:badMount) { $workspaceSource = 'C:\Windows\workspace' }
@@ -109,7 +115,6 @@ function Read-AiWslCommand {
     }
     if ($Arguments -contains 'stat') { return '998' }
     if ($Arguments -contains 'id') { return $script:launcherUser }
-    if ($Arguments -contains 'find') { return $script:imageTemporaryEntry }
     if ($Arguments -contains 'ps') { return '123456789abc' }
     if ($Arguments -contains 'ls') { return 'abcdef123456' }
     throw "Unexpected read: $Arguments"
@@ -297,15 +302,26 @@ try {
     $arguments = $create[0].Arguments
     $runner = $arguments[2]
     $runId = $runner.Substring('yumayo-ai-launch-'.Length)
+    $runtimeVolumeName = "yumayo-ai-tmp-$runId"
+    $runtimeSource = "/var/lib/docker/volumes/$runtimeVolumeName/_data"
     Assert-True ($arguments -contains '1000:998' -and -not ($arguments -contains '--group-add')) 'Keep the AI user UID and use the actual socket GID with supported wslc options.'
     Assert-True ($arguments -contains '--interactive' -and $arguments -contains '--tty') 'Prepare the launcher terminal before attachment.'
     Assert-True ($arguments -contains "io.yumayo.aicontainer.wsl-launch=$runId" -and -not ($arguments -contains "io.yumayo.aicontainer.wsl-run=$runId")) 'Keep the native launcher out of Docker-only child cleanup.'
     Assert-True ($arguments -contains 'DOCKER_HOST=unix:///var/run/aicontainer-engine/docker.sock') 'Use the socket exposed at the dedicated launcher mount.'
     $volumes = @($script:calls | Where-Object { ($_.Arguments -join ' ') -match '^system session run docker volume create ' })
     Assert-True ($volumes.Count -eq 4) 'Prepare local volumes for the engine socket directory, temporary files, workspace and repository.'
+    $runtimeVolume = @($volumes | Where-Object { $_.Arguments[-1] -eq $runtimeVolumeName })
+    Assert-True ($runtimeVolume.Count -eq 1 -and -not ($runtimeVolume[0].Arguments -contains '--opt')) 'Use a dedicated runtime volume rather than a bind of VM /tmp.'
+    Assert-True ($runtimeVolume[0].Arguments -contains "io.yumayo.aicontainer.wsl-run=$runId") 'Label the dedicated runtime volume with this invocation.'
+    Assert-True ($arguments -contains "type=volume,source=$runtimeVolumeName,target=$runtimeSource") 'Mount runtime files at the exact path seen by the Docker daemon.'
+    Assert-True ($arguments -contains "AICONTAINER_RUNTIME_ROOT=$runtimeSource") 'Tell the Bash launcher where to create firewall snapshots.'
+    $initialize = @($script:calls | Where-Object { $_.Arguments -contains 'install' })
+    Assert-True ($initialize.Count -eq 1) 'Initialize the runtime volume before starting the non-root launcher.'
+    Assert-True (($initialize[0].Arguments -join ' ') -match '^system session run docker run ') 'Use Docker for the volume initialization helper.'
+    Assert-True ($initialize[0].Arguments -contains "type=volume,source=$runtimeVolumeName,target=/aicontainer-runtime,volume-nocopy") 'Disable image copying on the supported Docker initialization command.'
+    Assert-True (($initialize[0].Arguments -join ' ') -match '-d -m 0700 -o 1000 -g 998 /aicontainer-runtime$') 'Give only the launcher user access to runtime files.'
     $expectedBindings = @(
         @{ Kind = 'engine'; Source = '/var/run'; Target = '/var/run/aicontainer-engine'; Suffix = ',readonly' },
-        @{ Kind = 'tmp'; Source = '/tmp'; Target = '/tmp'; Suffix = '' },
         @{ Kind = 'workspace'; Source = '/mnt/workspace-share'; Target = '/mnt/workspace-share'; Suffix = '' },
         @{ Kind = 'repository'; Source = '/mnt/repository-share'; Target = '/mnt/repository-share'; Suffix = ',readonly' }
     )
@@ -319,8 +335,8 @@ try {
         Assert-True ($arguments -contains "type=volume,source=$name,target=$($binding.Target)$($binding.Suffix)") 'Preserve VM paths and read-only access with supported mount options.'
     }
     Assert-True (@($arguments | Where-Object { $_ -like '*volume-nocopy*' }).Count -eq 0) 'Never pass unsupported volume-nocopy to wslc.'
-    $temporaryCheck = @($script:calls | Where-Object { $_.Arguments -contains 'find' })
-    Assert-True ($temporaryCheck.Count -eq 1 -and $temporaryCheck[0].Arguments -contains '/tmp' -and -not ($temporaryCheck[0].Arguments -contains '--mount')) 'Check image temporary files without mounting any VM or workspace directory.'
+    Assert-True (@($arguments | Where-Object { $_ -match 'target=/tmp(,|$)' }).Count -eq 0) 'Leave the base image /tmp private instead of mounting over its build artifacts.'
+    Assert-True (@($script:calls | Where-Object { $_.Arguments -contains 'find' }).Count -eq 0) 'Do not require the base image /tmp to be empty.'
     Assert-True (@($arguments | Where-Object { $_ -like 'type=bind,*' }).Count -eq 0) 'Never ask native wslc to translate VM bind paths as Windows paths.'
     Assert-True ($arguments[-1] -eq 'codex') 'Preserve tool selection.'
     Assert-True (-not ($arguments -contains '--privileged')) 'The launcher does not need a privileged container.'
@@ -365,11 +381,18 @@ try {
     Assert-True (@($script:calls | Where-Object { $_.Kind -eq 'interactive' }).Count -eq 0) 'Never attach with an invalid user identity.'
 
     Reset-Fixture
-    $script:imageTemporaryEntry = '/tmp/build-artifact'
-    Assert-Throws { Start-AiWslContainer -Wslc 'wslc.exe' -Repository $temporary -Workspace $temporary } 'base image /tmp is not empty'
-    Assert-True ($script:volumeCreateCount -eq 0) 'Reject image temporary files before mounting VM directories as volumes.'
-    Assert-True (@($script:calls | Where-Object { ($_.Arguments -join ' ') -match '^create --name yumayo-ai-launch-' }).Count -eq 0) 'Do not create a launcher that could copy image files into VM /tmp.'
-    Assert-True (($script:calls[-1].Arguments -join ' ') -match '^rm --force yumayo-ai-share-') 'Release shares when image copy-up cannot be avoided.'
+    $script:badRuntimePath = $true
+    Assert-Throws { Start-AiWslContainer -Wslc 'wslc.exe' -Repository $temporary -Workspace $temporary } 'runtime volume path'
+    Assert-True (@($script:calls | Where-Object { $_.Arguments -contains 'install' -or $_.Kind -eq 'interactive' }).Count -eq 0) 'Reject invalid VM paths before initializing or using the volume.'
+    Assert-True (@($script:calls | Where-Object { ($_.Arguments -join ' ') -match '^system session run docker volume rm ' }).Count -eq 1) 'Remove the runtime volume on inspection failure.'
+    Assert-True (($script:calls[-1].Arguments -join ' ') -match '^rm --force yumayo-ai-share-') 'Release shares after runtime path failure.'
+
+    Reset-Fixture
+    $script:failRuntimeInit = $true
+    Assert-Throws { Start-AiWslContainer -Wslc 'wslc.exe' -Repository $temporary -Workspace $temporary } 'Runtime initialization failed'
+    Assert-True (@($script:calls | Where-Object { $_.Kind -eq 'interactive' }).Count -eq 0) 'Do not start when the runtime volume cannot be prepared for the launcher user.'
+    Assert-True (@($script:calls | Where-Object { ($_.Arguments -join ' ') -match '^system session run docker volume rm ' }).Count -eq 1) 'Remove the runtime volume on initialization failure.'
+    Assert-True (($script:calls[-1].Arguments -join ' ') -match '^rm --force yumayo-ai-share-') 'Release shares after runtime initialization failure.'
 
     foreach ($failureAt in @(1, 3)) {
         Reset-Fixture

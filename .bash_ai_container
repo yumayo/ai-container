@@ -776,11 +776,15 @@ aicontainer() {
   # dumpにも同じ準備・後始末を含める。追加ネットワークは削除しない。
   local protected_networks
   printf -v protected_networks '%q ' "${AICONTAINER_APPEND_NETWORKS[@]}"
+  # WSLの起動用コンテナとDockerデーモンから同じ一時ファイルを参照する。
+  # 通常起動では従来どおり/tmpを使う。evalに渡すためパスはシェル用に引用する。
+  local runtime_template
+  printf -v runtime_template '%q' "${AICONTAINER_RUNTIME_ROOT:-/tmp}/aicontainer.XXXXXXXXXX"
   docker_cmd="(
     $network_version_check
     $(declare -f __aicontainer_cleanup_unused_networks)
     __aicontainer_cleanup_unused_networks $protected_networks
-    aicontainer_runtime_dir=\$(mktemp -d /tmp/aicontainer.XXXXXXXXXX) || exit 1
+    aicontainer_runtime_dir=\$(mktemp -d $runtime_template) || exit 1
     aicontainer_public_network=\"yumayo-ai-\${aicontainer_runtime_dir##*.}\"
     # Docker CLIが--network name=...形式の名前を小文字に変換するため、作成時も揃える。
     aicontainer_public_network=\"\${aicontainer_public_network,,}\"
