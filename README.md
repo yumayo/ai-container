@@ -4,6 +4,14 @@
 
 ## セットアップ
 
+Windows 向けに、WSL Containers の専用 VM に含まれる Docker Engine で既存の AI コンテナを起動する [`start-wsl.ps1`](start-wsl.ps1) を追加しました。WSL がなければ自動導入し、初回は既存 Dockerfile をビルドします。Docker Desktop や Docker Engine の手動インストールは不要です。**Windows 実機では未検証の実験的な起動経路です。** 内蔵 Docker の直接利用に依存します。手順と制約は [Windows / WSL Containers](docs/WSL.md) を参照してください。
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start-wsl.ps1 -Workspace C:\src\my-project -Tool codex
+```
+
+以下は従来の Docker 版の手順です。
+
 ```sh
 bash install.sh
 source .bash_ai_container

@@ -1,0 +1,9 @@
+# Linux build inputs must retain LF in Windows checkouts too.
+/docker/aicontainer/Dockerfile* text eol=lf
+/docker/aicontainer/*.sh text eol=lf
+/docker/aicontainer/ai-cli text eol=lf
+/docker/aicontainer/system-prompt.md text eol=lf
+/.bash_ai_container text eol=lf
+/scripts/*.sh text eol=lf
+/docker/docker-proxy/Dockerfile text eol=lf
+/docker/docker-proxy/*.sh text eol=lf

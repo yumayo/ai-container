@@ -1,0 +1,317 @@
+# Shared by the Windows installer and its offline tests. PowerShell 5.1+.
+Set-StrictMode -Version Latest
+
+function Assert-AiWslPlatform {
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -or
+        [Environment]::OSVersion.Version.Build -lt 22000) {
+        throw 'Run this script from PowerShell on Windows 11 (not from inside WSL).'
+    }
+    if (-not [Environment]::Is64BitProcess) {
+        throw 'Use 64-bit PowerShell so that WSL executables are not redirected to SysWOW64.'
+    }
+}
+
+function Find-AiWslExecutable {
+    param([Parameter(Mandatory = $true)][string] $Name)
+
+    # An installation can finish before the current terminal's PATH is refreshed.
+    $candidates = @(
+        (Join-Path $env:ProgramFiles "WSL\$Name"),
+        (Join-Path $env:SystemRoot "System32\$Name")
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return $candidate
+        }
+    }
+    $command = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+    return $null
+}
+
+function Get-AiWslVersion {
+    param([Parameter(Mandatory = $true)][string] $Wsl)
+
+    # Windows PowerShell represents native stderr as error records. A failed
+    # version probe is expected for the inbox stub on a machine without WSL.
+    $ErrorActionPreference = 'Continue'
+    $PSNativeCommandUseErrorActionPreference = $false
+    $output = & $Wsl --version 2>$null
+    if ($LASTEXITCODE -ne 0) { return $null }
+    $versionText = ($output -join "`n").Replace([string][char]0, '')
+    # The first version is WSL itself; subsequent lines describe the kernel etc.
+    if ($versionText -match '(?m)^.*?(\d+\.\d+\.\d+(?:\.\d+)?).*?$') {
+        return [version] $Matches[1]
+    }
+    return $null
+}
+
+function Invoke-AiWslSetupCommand {
+    param(
+        [Parameter(Mandatory = $true)][string] $Wsl,
+        [Parameter(Mandatory = $true)][string[]] $Arguments
+    )
+
+    # Only WSL installation/update is elevated. Builds must stay in the calling
+    # user's session: elevated wslc uses a different image/container store.
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try {
+        $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+        $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } finally {
+        $identity.Dispose()
+    }
+    $options = @{
+        FilePath = $Wsl
+        ArgumentList = $Arguments
+        Wait = $true
+        PassThru = $true
+    }
+    if (-not $isAdmin) { $options.Verb = 'RunAs' }
+    # Arguments here are fixed WSL switches, never user-supplied command text.
+    $process = Start-Process @options
+    return $process.ExitCode
+}
+
+function Get-AiWslVirtualMachineState {
+    $feature = Get-CimInstance Win32_OptionalFeature -Filter "Name='VirtualMachinePlatform'" -ErrorAction Stop
+    if (-not $feature) { throw 'VirtualMachinePlatform is unavailable on this Windows installation.' }
+    return $feature.InstallState
+}
+
+function Initialize-AiWsl {
+    param([switch] $WebDownload)
+
+    $wsl = Find-AiWslExecutable 'wsl.exe'
+    if (-not $wsl) {
+        throw 'wsl.exe was not found. Update Windows 11 before running this installer.'
+    }
+    $version = Get-AiWslVersion $wsl
+    $featureEnabled = (Get-AiWslVirtualMachineState) -eq 1
+    if (-not $version -or -not $featureEnabled) {
+        Write-Host 'Installing WSL without an Ubuntu distribution. Windows may request administrator access.'
+        $arguments = @('--install', '--no-distribution')
+        if ($WebDownload) { $arguments += '--web-download' }
+        $code = Invoke-AiWslSetupCommand $wsl $arguments
+        if ($code -notin @(0, 3010, 1641)) {
+            throw "WSL installation failed (exit $code). See the WSL installer output."
+        }
+        # A first install can return zero even when a reboot is required.
+        Write-Host 'Restart Windows, then run the same command again. No automatic reboot will occur.'
+        return [pscustomobject] @{ ExitCode = 3010; Wslc = $null }
+    }
+
+    $wslc = Find-AiWslExecutable 'wslc.exe'
+    # 2.9.3 introduced the preview; use the generally available release or newer.
+    if ($version -lt [version] '3.0.1' -or -not $wslc) {
+        Write-Host 'Updating WSL to a stable release with WSL Containers.'
+        $arguments = @('--update')
+        if ($WebDownload) { $arguments += '--web-download' }
+        $code = Invoke-AiWslSetupCommand $wsl $arguments
+        if ($code -in @(3010, 1641)) {
+            Write-Host 'Restart Windows, then run the same command again.'
+            return [pscustomobject] @{ ExitCode = 3010; Wslc = $null }
+        }
+        if ($code -ne 0) { throw "WSL update failed (exit $code). See the WSL installer output." }
+        $wsl = Find-AiWslExecutable 'wsl.exe'
+        $version = Get-AiWslVersion $wsl
+        $wslc = Find-AiWslExecutable 'wslc.exe'
+        if (-not $version -or $version -lt [version] '3.0.1' -or -not $wslc) {
+            throw 'WSL 3.0.1+ and wslc.exe are required. Restart Windows and retry; check wsl --version if this persists.'
+        }
+    }
+    Invoke-AiWslCommand $wslc @('version')
+    return [pscustomobject] @{ ExitCode = 0; Wslc = $wslc }
+}
+
+function Invoke-AiWslCommand {
+    param(
+        [Parameter(Mandatory = $true)][string] $Executable,
+        [Parameter(Mandatory = $true)][string[]] $Arguments
+    )
+    $PSNativeCommandUseErrorActionPreference = $false
+    & $Executable @Arguments | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "wslc $($Arguments[0]) failed (exit $LASTEXITCODE)."
+    }
+}
+
+function Build-AiWslImages {
+    param(
+        [Parameter(Mandatory = $true)][string] $Wslc,
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [ValidateSet('all', 'base', 'main', 'proxy', 'rebuild')][string] $Target = 'all'
+    )
+
+    $context = Join-Path $Repository 'docker/aicontainer'
+    # COPY and Dockerfile heredocs require LF, including on Git for Windows.
+    # Reject a stale CRLF checkout without silently rewriting source files.
+    $linuxFiles = @('Dockerfile.base', 'Dockerfile', 'entrypoint.sh', 'init-firewall.sh', 'ai-cli',
+        '../docker-proxy/Dockerfile', '../docker-proxy/entrypoint.sh')
+    foreach ($name in $linuxFiles) {
+        $file = Join-Path $context $name
+        if ([IO.File]::ReadAllText($file).Contains("`r")) {
+            throw "CRLF found in $file. Restore this file with LF line endings and retry (see docs/WSL.md)."
+        }
+    }
+    Push-Location -LiteralPath $context
+    try {
+        if ($Target -in @('all', 'base', 'rebuild')) {
+            Write-Host "Building yumayo-ai-base from Dockerfile.base..."
+            $arguments = @('build', '-t', 'yumayo-ai-base', '-f', 'Dockerfile.base')
+            if ($Target -eq 'rebuild') { $arguments += '--no-cache' }
+            Invoke-AiWslCommand $Wslc ($arguments + '.')
+        }
+        if ($Target -in @('all', 'main', 'rebuild')) {
+            Write-Host "Building yumayo-ai from Dockerfile..."
+            Invoke-AiWslCommand $Wslc @('build', '--no-cache', '-t', 'yumayo-ai', '-f', 'Dockerfile', '.')
+        }
+        if ($Target -in @('all', 'proxy', 'rebuild')) {
+            Set-Location -LiteralPath (Join-Path $Repository 'docker/docker-proxy')
+            Write-Host 'Building yumayo-ai-proxy from Dockerfile...'
+            Invoke-AiWslCommand $Wslc @('build', '--no-cache', '-t', 'yumayo-ai-proxy', '-f', 'Dockerfile', '.')
+        }
+    } finally {
+        Pop-Location
+    }
+}
+
+function Read-AiWslCommand {
+    param([string] $Wslc, [string[]] $Arguments)
+    $PSNativeCommandUseErrorActionPreference = $false
+    $output = & $Wslc @Arguments
+    if ($LASTEXITCODE -ne 0) { throw "wslc $($Arguments[0]) failed (exit $LASTEXITCODE)." }
+    return ($output -join "`n")
+}
+
+function Test-AiWslImages {
+    param([string] $Wslc)
+    # First distinguish a broken engine from missing images.
+    Invoke-AiWslCommand $Wslc @('system', 'session', 'run', 'docker', 'info')
+    $PSNativeCommandUseErrorActionPreference = $false
+    $ErrorActionPreference = 'Continue'
+    & $Wslc system session run docker image inspect yumayo-ai-base yumayo-ai yumayo-ai-proxy 1>$null 2>$null
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Get-AiWslMountSource {
+    param([object[]] $Mounts, [string] $Destination)
+    $mountEntries = @($Mounts | Where-Object { $_.Destination -eq $Destination -and $_.Type -eq 'bind' })
+    if ($mountEntries.Count -ne 1 -or $mountEntries[0].Source -notmatch '^/mnt/[a-zA-Z0-9_{}./-]+$' -or
+        $mountEntries[0].Source -match '(^|/)\.\.(/|$)') {
+        throw "WSL Containers did not expose the expected VM bind source for $Destination. See docs/WSL.md."
+    }
+    # Do not guess /mnt/c or pass a Windows path to the VM's Docker daemon.
+    return $mountEntries[0].Source
+}
+
+function Invoke-AiWslInteractive {
+    param([string] $Wslc, [string] $Name)
+    $PSNativeCommandUseErrorActionPreference = $false
+    # session run provides pipes, not a PTY. Use the native container terminal
+    # for the runner created through Docker. Do not capture/pipe this output.
+    & $Wslc start --attach --interactive $Name
+    $script:AiWslExitCode = $LASTEXITCODE
+}
+
+function Start-AiWslContainer {
+    param(
+        [Parameter(Mandatory = $true)][string] $Wslc,
+        [Parameter(Mandatory = $true)][string] $Repository,
+        [Parameter(Mandatory = $true)][string] $Workspace,
+        [ValidateSet('', 'claude', 'codex', 'bash')][string] $Tool = ''
+    )
+
+    $workspaceItem = Get-Item -LiteralPath $Workspace -ErrorAction Stop
+    if (-not $workspaceItem.PSIsContainer -or $workspaceItem.PSProvider.Name -ne 'FileSystem') {
+        throw 'Workspace must be an existing filesystem directory.'
+    }
+    $Workspace = $workspaceItem.FullName
+    $Repository = (Get-Item -LiteralPath $Repository -ErrorAction Stop).FullName
+    foreach ($file in @('.bash_ai_container', 'scripts/wsl-launch.sh')) {
+        if ([IO.File]::ReadAllText((Join-Path $Repository $file)).Contains("`r")) {
+            throw "CRLF found in $file. Restore LF line endings before starting."
+        }
+    }
+
+    $runId = [guid]::NewGuid().ToString('N')
+    $carrier = "yumayo-ai-share-$runId"
+    $runner = "yumayo-ai-launch-$runId"
+    $owner = "io.yumayo.aicontainer.wsl-run=$runId"
+    $docker = @('system', 'session', 'run', 'docker')
+    $carrierCreated = $false
+    $runnerCreated = $false
+    $script:AiWslExitCode = 1
+    try {
+        # Prove that the bundled engine accepts the required capabilities.
+        # This isolated probe has no workspace or credentials mounted.
+        Invoke-AiWslCommand $Wslc ($docker + @(
+            'run', '--rm', '--network', 'none', '--user', '0',
+            '--cap-add=NET_ADMIN', '--cap-add=NET_RAW', '--entrypoint', '/bin/sh',
+            'yumayo-ai', '-c', 'iptables -S && ip6tables -S && ipset list'
+        ))
+
+        # Keep WSL's Windows/virtiofs shares alive while the nested launcher runs.
+        # This container runs only sleep; it has no Docker socket or AI process.
+        Invoke-AiWslCommand $Wslc @(
+            'create', '--name', $carrier, '--network', 'none',
+            '--volume', "${Workspace}:/aicontainer/workspace",
+            '--volume', "${Repository}:/aicontainer/repository:ro",
+            '--entrypoint', '/bin/sleep', 'yumayo-ai-base', 'infinity'
+        )
+        $carrierCreated = $true
+        Invoke-AiWslCommand $Wslc @('start', $carrier)
+        $inspection = @(ConvertFrom-Json (Read-AiWslCommand $Wslc ($docker + @('inspect', $carrier))))
+        $workspaceSource = Get-AiWslMountSource $inspection[0].Mounts '/aicontainer/workspace'
+        $repositorySource = Get-AiWslMountSource $inspection[0].Mounts '/aicontainer/repository'
+        $socketGroup = (Read-AiWslCommand $Wslc @('system', 'session', 'run', 'stat', '-c', '%g', '/var/run/docker.sock')).Trim()
+        if ($socketGroup -notmatch '^\d+$') { throw 'Could not determine the bundled Docker socket group.' }
+
+        # The launcher and daemon must see identical paths for all bind mounts,
+        # including the legacy launcher's read-only firewall snapshots in /tmp.
+        # Only this trusted launcher has the raw engine socket. The AI container
+        # is created by .bash_ai_container with its existing restrictions.
+        $arguments = $docker + @(
+            'create', '--name', $runner, '--interactive', '--tty', '--network', 'none',
+            '--user', 'ubuntu', '--group-add', $socketGroup, '--label', $owner,
+            '--env', 'DOCKER_HOST=unix:///var/run/docker.sock', '--env', 'TERM=xterm-256color',
+            '--mount', 'type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock',
+            '--mount', 'type=bind,source=/tmp,target=/tmp',
+            '--mount', "type=bind,source=$workspaceSource,target=$workspaceSource"
+        )
+        if ($repositorySource -ne $workspaceSource) {
+            $arguments += @('--mount', "type=bind,source=$repositorySource,target=$repositorySource,readonly")
+        }
+        $arguments += @('yumayo-ai-base', 'bash', "$repositorySource/scripts/wsl-launch.sh",
+            $repositorySource, $workspaceSource, $runId)
+        if ($Tool) { $arguments += $Tool }
+        Invoke-AiWslCommand $Wslc $arguments
+        $runnerCreated = $true
+        Invoke-AiWslInteractive $Wslc $runner
+    } finally {
+        # Stop the trusted launcher first so it cannot create another child
+        # between querying and removing this invocation's AI containers.
+        if ($runnerCreated) {
+            try { Invoke-AiWslCommand $Wslc ($docker + @('rm', '--force', $runner)) }
+            catch { Write-Warning "Could not remove launcher ${runner}: $_" }
+        }
+        try {
+            $children = Read-AiWslCommand $Wslc ($docker + @('ps', '-aq', '--filter', "label=$owner"))
+            foreach ($id in ($children -split '\s+')) {
+                if ($id -match '^[0-9a-f]{12,64}$') {
+                    Invoke-AiWslCommand $Wslc ($docker + @('rm', '--force', $id))
+                }
+            }
+            $networks = Read-AiWslCommand $Wslc ($docker + @('network', 'ls', '-q', '--filter', "label=$owner"))
+            foreach ($id in ($networks -split '\s+')) {
+                if ($id -match '^[0-9a-f]{12,64}$') {
+                    Invoke-AiWslCommand $Wslc ($docker + @('network', 'rm', $id))
+                }
+            }
+        } catch { Write-Warning "Could not clean up AI resources for ${runId}: $_" }
+        if ($carrierCreated) {
+            try { Invoke-AiWslCommand $Wslc @('rm', '--force', $carrier) }
+            catch { Write-Warning "Could not release Windows shares ${carrier}: $_" }
+        }
+    }
+}
