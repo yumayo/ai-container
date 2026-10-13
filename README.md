@@ -298,6 +298,20 @@ Dockerサブネット全体を自動で許可するルールはありません�
 
 ## アンインストール
 
+Windows / WSL Containers 版は、AI を終了してから次を実行します。WSL 本体と Windows 側の作業ファイル・認証情報は保持し、現在の WSL Containers セッションの AI 用リソースを削除します。対象の詳細は [Windows / WSL Containers](docs/WSL.md#アンインストール) を参照してください。
+
+```powershell
+# 削除予定を確認
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\uninstall-wsl-containers.ps1 -WhatIf
+
+# 削除を実行
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\uninstall-wsl-containers.ps1
+```
+
+`-ExecutionPolicy Bypass` は起動する PowerShell プロセスだけに適用され、システムの実行ポリシーは変更しません。
+
+従来の Docker 版は次を実行します。
+
 ```sh
 bash uninstall.sh
 ```

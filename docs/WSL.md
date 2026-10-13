@@ -71,6 +71,36 @@ wslc image list
 
 既存の `docker/aicontainer/Dockerfile.base`、`docker/aicontainer/Dockerfile`、`docker/docker-proxy/Dockerfile` を変更せずに使用します。通常の全体ビルドはベースのキャッシュを利用し、メインと Proxy はキャッシュなしです。Docker Desktop / 別の WSL ディストリビューションにあるイメージは共有されません。
 
+## アンインストール
+
+AI を終了して `start-wsl-containers.ps1` が戻ったことを確認し、起動時と同じ Windows ユーザー・権限の PowerShell で実行します。
+
+```powershell
+# 削除予定を表示するだけ
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\uninstall-wsl-containers.ps1 -WhatIf
+
+# AI コンテナ用のリソースを削除
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\uninstall-wsl-containers.ps1
+```
+
+直接 `.\uninstall-wsl-containers.ps1` を実行して `PSSecurityException` が出る場合は、実行ポリシーによってスクリプトの起動前に停止しています。上記のコマンドは、その PowerShell プロセスだけに `Bypass` を適用します。システムの実行ポリシーを変更したり、管理者として起動したりする必要はありません。
+
+対象は現在の WSL Containers セッションにある、このプロジェクトのリソースです。ワークスペース単位の削除ではありません。
+
+- `yumayo-ai-launch-<ID>` / `yumayo-ai-share-<ID>` / `yumayo-ai-relay-<ID>` と、起動時の所有者ラベルを持つ AI コンテナ。
+- `yumayo-ai-proxy` イメージを使う `yumayo-ai-proxy` / `yumayo-ai-proxy-<名前>` コンテナと、専用の `*-sock` ボリューム。
+- 所有者ラベル、または専用の名前と `io.yumayo.aicontainer.network=public` ラベルで識別できる AI 通信用ネットワーク。
+- `yumayo-ai-tmp-<ID>` / `yumayo-ai-engine-<ID>` など、この起動処理が作成した一時ボリューム。`<ID>` は 32 桁の GUID です。旧実装の Docker ボリュームも対象です。
+- `yumayo-ai:latest` / `yumayo-ai-proxy:latest` / `yumayo-ai-base:latest` のイメージタグ。
+
+WSL 管理のコンテナとボリュームは `wslc`、内蔵 Docker で作成したものは同じ内蔵 Docker 経由で削除します。コンテナを先に削除し、ボリュームの参照を解放してから削除します。追加ネットワークへの強制切断や、イメージ・Docker ボリュームの強制削除、共有エンジン全体の prune は行いません。
+
+WSL 本体、他のディストリビューション、Windows の仮想化機能、Windows 側の作業ファイルと `.claude.local` / `.codex.local`、カスタムイメージ、共有ビルドキャッシュは保持します。WSL の新規導入・更新・管理者への昇格も行いません。
+
+一覧の取得に失敗した場合は削除を開始しません。個別の削除に失敗した場合は項目を表示して他の削除を続け、最後に終了コード `1` を返します。使用中のリソースなどを確認して再実行してください。削除済みの項目は再実行時の対象になりません。`wslc.exe` が見つからない場合は、その旨を表示して何も変更せず終了します。
+
+処理は `uninstall-wsl-containers.ps1` → `wsl-containers/remove-ai-resources.ps1` の `Remove-AiWslResources` に分けています。共通のコマンド実行処理は `wsl-containers/wsl-containers.ps1` を使います。
+
 ## ファイルと呼び出し関係
 
 ```text
@@ -173,6 +203,7 @@ DISM ログの `Encountered an unknown option "featurename"` が `Info` とし�
 ```powershell
 # WSL の導入やネットワーク通信をしない PowerShell モックテスト
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\test\test_wsl_containers.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\test\test_wsl_uninstall.ps1
 ```
 
 ```sh
