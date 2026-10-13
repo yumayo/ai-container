@@ -1,9 +1,12 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-Prepare WSL if necessary and start AI Container using its bundled Docker engine.
+Start AI Container using the Docker engine bundled with WSL Containers.
+.DESCRIPTION
+Prepare WSL Containers (including WSL installation or update when needed),
+build missing images, and start the AI container.
 .EXAMPLE
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start-wsl.ps1 -Workspace C:\src\my-project -Tool codex
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start-wsl-containers.ps1 -Workspace C:\src\my-project -Tool codex
 #>
 [CmdletBinding()]
 param(

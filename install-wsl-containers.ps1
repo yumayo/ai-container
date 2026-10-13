@@ -1,11 +1,14 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-Install WSL Containers and build the existing AI Container Dockerfiles.
+Prepare WSL Containers and build the existing AI Container Dockerfiles.
+.DESCRIPTION
+Install or update WSL and enable VirtualMachinePlatform when needed.
+Build AI Container images by default; -Target setup only prepares WSL Containers.
 .EXAMPLE
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-wsl.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-wsl-containers.ps1
 .EXAMPLE
-.\install-wsl.ps1 -Target setup -WebDownload
+.\install-wsl-containers.ps1 -Target setup -WebDownload
 #>
 [CmdletBinding()]
 param(
@@ -22,7 +25,7 @@ try {
     if ($result.ExitCode -ne 0) { exit $result.ExitCode }
     if ($Target -ne 'setup') {
         Build-AiWslImages -Wslc $result.Wslc -Repository $PSScriptRoot -Target $Target
-        Write-Host 'Image build complete. Run start-wsl.ps1 -Workspace <project directory> to start AI Container.'
+        Write-Host 'Image build complete. Run start-wsl-containers.ps1 -Workspace <project directory> to start AI Container.'
     }
     exit 0
 } catch {

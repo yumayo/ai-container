@@ -19,7 +19,7 @@ Windows の起動スクリプト
 Windows 11 の 64 bit PowerShell で、このリポジトリのフォルダーから実行します。WSL 内の Bash からは実行しません。
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start-wsl.ps1 -Workspace C:\src\my-project -Tool codex
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start-wsl-containers.ps1 -Workspace C:\src\my-project -Tool codex
 ```
 
 利用者の操作は次の流れです。
@@ -35,18 +35,18 @@ WSL が導入済みでも `VirtualMachinePlatform` が無効なら、DISM でそ
 
 ```powershell
 # .aicontainer の tool 設定を使用。設定がなければ Claude Code
-.\start-wsl.ps1 -Workspace C:\src\my-project
+.\start-wsl-containers.ps1 -Workspace C:\src\my-project
 
 # Claude Code / Codex CLI / Bash を指定
-.\start-wsl.ps1 -Workspace C:\src\my-project -Tool claude
-.\start-wsl.ps1 -Workspace C:\src\my-project -Tool codex
-.\start-wsl.ps1 -Workspace C:\src\my-project -Tool bash
+.\start-wsl-containers.ps1 -Workspace C:\src\my-project -Tool claude
+.\start-wsl-containers.ps1 -Workspace C:\src\my-project -Tool codex
+.\start-wsl-containers.ps1 -Workspace C:\src\my-project -Tool bash
 
 # Dockerfile や AI ツールを更新したいとき
-.\start-wsl.ps1 -Workspace C:\src\my-project -Rebuild
+.\start-wsl-containers.ps1 -Workspace C:\src\my-project -Rebuild
 
 # WSL を Microsoft Store 以外の配布経路から導入・更新する環境向け
-.\start-wsl.ps1 -Workspace C:\src\my-project -WebDownload
+.\start-wsl-containers.ps1 -Workspace C:\src\my-project -WebDownload
 ```
 
 `-Workspace` は既存のディレクトリを指定します。省略時は現在のディレクトリを使います。認証情報と履歴は、そのプロジェクトの `.claude.local` / `.codex.local` に保存します。イメージがそろっている場合、次回起動ではビルドを省略します。
@@ -57,13 +57,15 @@ WSL が導入済みでも `VirtualMachinePlatform` が無効なら、DISM でそ
 
 ## 導入・ビルドだけを行う場合
 
+`install-wsl-containers.ps1` は、WSL Containers を使うための環境を準備します。WSL が未導入なら実際にインストールし、必要に応じて更新や Windows 機能の有効化を行います。既定では AI 用イメージのビルドまで進み、`-Target setup` を指定すると環境準備だけを行います。`start-wsl-containers.ps1` も同じ環境準備を行ってから AI を起動するため、通常の利用では `start` だけで開始できます。
+
 ```powershell
-.\install-wsl.ps1 -Target setup   # WSL と Windows 機能を準備
-.\install-wsl.ps1                 # ベース・AI・Proxy をビルド
-.\install-wsl.ps1 -Target base
-.\install-wsl.ps1 -Target main
-.\install-wsl.ps1 -Target proxy
-.\install-wsl.ps1 -Target rebuild # すべてキャッシュなし
+.\install-wsl-containers.ps1 -Target setup   # WSL と Windows 機能を準備
+.\install-wsl-containers.ps1                 # ベース・AI・Proxy をビルド
+.\install-wsl-containers.ps1 -Target base
+.\install-wsl-containers.ps1 -Target main
+.\install-wsl-containers.ps1 -Target proxy
+.\install-wsl-containers.ps1 -Target rebuild # すべてキャッシュなし
 wslc image list
 ```
 
@@ -72,7 +74,7 @@ wslc image list
 ## ファイルと呼び出し関係
 
 ```text
-start-wsl.ps1
+start-wsl-containers.ps1
 └─ wsl-containers/wsl-containers.ps1（Start-AiWslContainer）
    ├─ 中継用コンテナ
    │  └─ wsl-containers/wsl-docker-relay/run-relay.sh
@@ -210,11 +212,11 @@ Hyper-V を利用できるホストでは、次の手順で通しの検証を繰
 3. ゲストにリポジトリをコピーし、通常権限の PowerShell から次を実行します。WSL 本体や機能の導入で再起動を案内されたら、ゲストを再起動して同じコマンドを繰り返し、セットアップが終了コード `0` で完了することを確認します。
 
    ```powershell
-   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-wsl.ps1 -Target setup
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-wsl-containers.ps1 -Target setup
    $LASTEXITCODE
    ```
 
-4. 導入後のゲストをシャットダウンし、ホストで `wsl-ready` という別のチェックポイントも保存します。その状態を使うと、イメージビルドや AI 起動のテストを WSL 導入からやり直す必要がありません。ゲストを起動し、既存のプロジェクトを指定して `start-wsl.ps1` を実行します。
+4. 導入後のゲストをシャットダウンし、ホストで `wsl-ready` という別のチェックポイントも保存します。その状態を使うと、イメージビルドや AI 起動のテストを WSL 導入からやり直す必要がありません。ゲストを起動し、既存のプロジェクトを指定して `start-wsl-containers.ps1` を実行します。
 5. 導入を再検証するときは、必要なログと変更を VM の外へ保存し、ゲストをシャットダウンしてからホストで次を実行します。チェックポイントの復元では、保存時点より後のゲスト内の変更が失われます。
 
    ```powershell
