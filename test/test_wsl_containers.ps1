@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 # Offline tests: no WSL installation, elevation, Docker, or network access.
 $ErrorActionPreference = 'Stop'
-. (Join-Path $PSScriptRoot '../scripts/wsl-containers.ps1')
+. (Join-Path $PSScriptRoot '../wsl-containers/wsl-containers.ps1')
 
 $originalProbe = ${function:Get-AiWslVersion}
 $originalFind = ${function:Find-AiWslExecutable}
@@ -324,10 +324,10 @@ try {
     Assert-Throws { Build-AiWslImages -Wslc 'wslc.exe' -Repository $temporary } 'CRLF'
     Assert-True ($script:calls.Count -eq 0) 'Reject stale Windows checkouts before starting a build.'
 
-    $scripts = Join-Path $temporary 'scripts'
-    $null = New-Item -ItemType Directory -Path $scripts
-    [IO.File]::WriteAllText((Join-Path $scripts 'wsl-launch.sh'), "# fixture`n")
-    $relayScripts = Join-Path $scripts 'wsl-docker-relay'
+    $wslContainers = Join-Path $temporary 'wsl-containers'
+    $null = New-Item -ItemType Directory -Path $wslContainers
+    [IO.File]::WriteAllText((Join-Path $wslContainers 'wsl-launch.sh'), "# fixture`n")
+    $relayScripts = Join-Path $wslContainers 'wsl-docker-relay'
     $null = New-Item -ItemType Directory -Path $relayScripts
     [IO.File]::WriteAllText((Join-Path $relayScripts 'run-relay.sh'), "# fixture`n")
     [IO.File]::WriteAllText((Join-Path $temporary '.bash_ai_container'), "# fixture`n")

@@ -308,7 +308,7 @@ function Start-AiWslContainer {
     }
     $Workspace = $workspaceItem.FullName
     $Repository = (Get-Item -LiteralPath $Repository -ErrorAction Stop).FullName
-    foreach ($file in @('.bash_ai_container', 'scripts/wsl-launch.sh', 'scripts/wsl-docker-relay/run-relay.sh')) {
+    foreach ($file in @('.bash_ai_container', 'wsl-containers/wsl-launch.sh', 'wsl-containers/wsl-docker-relay/run-relay.sh')) {
         if ([IO.File]::ReadAllText((Join-Path $Repository $file)).Contains("`r")) {
             throw "CRLF found in $file. Restore LF line endings before starting."
         }
@@ -389,7 +389,7 @@ function Start-AiWslContainer {
             '--label', "io.yumayo.aicontainer.wsl-relay=$runId",
             '--mount', "type=bind,source=$engineSource,target=/aicontainer-engine",
             '--mount', 'type=bind,source=/var/run/docker.sock,target=/aicontainer-upstream/docker.sock,readonly',
-            '--mount', "type=bind,source=$repositorySource/scripts/wsl-docker-relay,target=/aicontainer-relay,readonly",
+            '--mount', "type=bind,source=$repositorySource/wsl-containers/wsl-docker-relay,target=/aicontainer-relay,readonly",
             'yumayo-ai-base', 'bash', '/aicontainer-relay/run-relay.sh',
             'serve', '/aicontainer-engine/docker.sock', '/aicontainer-upstream/docker.sock'
         ))
@@ -432,7 +432,7 @@ function Start-AiWslContainer {
             '--env', 'DOCKER_HOST=unix:///aicontainer-engine/docker.sock', '--env', 'TERM=xterm-256color',
             '--env', "AICONTAINER_RUNTIME_ROOT=$runtimeSource"
         ) + $mountArguments
-        $arguments += @('yumayo-ai-base', 'bash', "$repositorySource/scripts/wsl-launch.sh",
+        $arguments += @('yumayo-ai-base', 'bash', "$repositorySource/wsl-containers/wsl-launch.sh",
             $repositorySource, $workspaceSource, $runId)
         if ($Tool) { $arguments += $Tool }
         Invoke-AiWslCommand $Wslc $arguments

@@ -26,7 +26,7 @@ class WslLaunchTest(unittest.TestCase):
 
     def launch(self, *args, run_id=RUN_ID):
         return subprocess.run(
-            ["bash", str(REPOSITORY / "scripts/wsl-launch.sh"),
+            ["bash", str(REPOSITORY / "wsl-containers/wsl-launch.sh"),
              str(REPOSITORY), str(self.work_path), run_id, *args],
             env=self.env, text=True, capture_output=True,
         )

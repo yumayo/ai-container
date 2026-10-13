@@ -15,7 +15,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 try {
-    . (Join-Path $PSScriptRoot 'scripts/wsl-containers.ps1')
+    . (Join-Path $PSScriptRoot 'wsl-containers/wsl-containers.ps1')
     Assert-AiWslPlatform
     if (-not (Test-Path -LiteralPath $Workspace -PathType Container)) {
         if ($Workspace -match '^[A-Za-z]:(?![\\/])') {

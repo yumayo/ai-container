@@ -73,17 +73,17 @@ wslc image list
 
 ```text
 start-wsl.ps1
-└─ scripts/wsl-containers.ps1（Start-AiWslContainer）
+└─ wsl-containers/wsl-containers.ps1（Start-AiWslContainer）
    ├─ 中継用コンテナ
-   │  └─ scripts/wsl-docker-relay/run-relay.sh
+   │  └─ wsl-containers/wsl-docker-relay/run-relay.sh
    │     └─ exec node docker-socket-relay.cjs <serve|check> ...
    └─ 起動用コンテナ
-      └─ scripts/wsl-launch.sh
+      └─ wsl-containers/wsl-launch.sh
          └─ .bash_ai_container の aicontainer 関数
             └─ docker run で AI コンテナを起動
 ```
 
-中継用のファイルは `scripts/wsl-docker-relay/` にまとめています。このディレクトリだけを中継用コンテナの `/aicontainer-relay` に読み取り専用でマウントします。
+中継用のファイルは `wsl-containers/wsl-docker-relay/` にまとめています。このディレクトリだけを中継用コンテナの `/aicontainer-relay` に読み取り専用でマウントします。
 
 | ファイル | 役割 |
 | --- | --- |

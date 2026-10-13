@@ -16,7 +16,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 try {
-    . (Join-Path $PSScriptRoot 'scripts/wsl-containers.ps1')
+    . (Join-Path $PSScriptRoot 'wsl-containers/wsl-containers.ps1')
     Assert-AiWslPlatform
     $result = Initialize-AiWsl -WebDownload:$WebDownload
     if ($result.ExitCode -ne 0) { exit $result.ExitCode }

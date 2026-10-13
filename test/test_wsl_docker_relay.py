@@ -12,7 +12,7 @@ import time
 import unittest
 
 
-RELAY = Path(__file__).resolve().parents[1] / "scripts/wsl-docker-relay/docker-socket-relay.cjs"
+RELAY = Path(__file__).resolve().parents[1] / "wsl-containers/wsl-docker-relay/docker-socket-relay.cjs"
 
 
 def receive_all(connection):
