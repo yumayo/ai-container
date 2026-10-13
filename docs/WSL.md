@@ -6,12 +6,13 @@ WSL Containers の専用 VM に含まれる Docker Engine を使い、既存の 
 Windows の起動スクリプト
   └─ WSL Containers の専用 VM（内蔵 Docker Engine）
        ├─ 起動用コンテナ：既存の aicontainer 関数を実行
+       ├─ 中継用コンテナ：起動用コンテナから内蔵 Docker への Unix ソケット接続
        └─ AI コンテナ：既存の Dockerfile、ENTRYPOINT、通信先制限を使用
 ```
 
 起動用コンテナが内蔵 Docker に AI コンテナの作成を依頼します。起動用コンテナの中で別の Docker デーモンを動かす構成ではありません。AI コンテナへ直接渡す Docker ソケットは従来どおり、設定した場合の制限付き Docker Socket Proxy だけです。
 
-**実験的な対応です。Windows 実機で AI の対話起動が完了することは未確認です。** WSL 3.0.1 の実機では内蔵 Docker の応答、必要な権限の確認、Windows フォルダーの共有まで確認しています。`wslc system session run docker ...` で内蔵エンジンを直接操作するため、WSL Containers の内部実装に依存します。通常の `wslc run` の機能だけで動く構成としては扱わないでください。
+**実験的な対応です。** WSL 3.0.1 を使った利用者の Windows 実環境で、内蔵 Docker を経由した AI コンテナの起動が確認されました。`wslc system session run docker ...` で内蔵エンジンを直接操作するため、WSL Containers の内部実装に依存します。通常の `wslc run` の機能だけで動く構成としては扱わないでください。
 
 ## 使い方
 
@@ -68,6 +69,31 @@ wslc image list
 
 既存の `docker/aicontainer/Dockerfile.base`、`docker/aicontainer/Dockerfile`、`docker/docker-proxy/Dockerfile` を変更せずに使用します。通常の全体ビルドはベースのキャッシュを利用し、メインと Proxy はキャッシュなしです。Docker Desktop / 別の WSL ディストリビューションにあるイメージは共有されません。
 
+## ファイルと呼び出し関係
+
+```text
+start-wsl.ps1
+└─ scripts/wsl-containers.ps1（Start-AiWslContainer）
+   ├─ 中継用コンテナ
+   │  └─ scripts/wsl-docker-relay/run-relay.sh
+   │     └─ exec node docker-socket-relay.cjs <serve|check> ...
+   └─ 起動用コンテナ
+      └─ scripts/wsl-launch.sh
+         └─ .bash_ai_container の aicontainer 関数
+            └─ docker run で AI コンテナを起動
+```
+
+中継用のファイルは `scripts/wsl-docker-relay/` にまとめています。このディレクトリだけを中継用コンテナの `/aicontainer-relay` に読み取り専用でマウントします。
+
+| ファイル | 役割 |
+| --- | --- |
+| `run-relay.sh` | nvm を読み込んで Node.js の PATH を設定し、引数をそのまま `docker-socket-relay.cjs` へ渡します。`exec` するため、Bash は Node.js プロセスに置き換わります。 |
+| `docker-socket-relay.cjs` | `serve` は Unix ソケット間の双方向バイト中継、`check` は中継経由の HTTP `GET /_ping` による起動確認です。`.cjs` は CommonJS 形式の Node.js モジュールを表します。 |
+
+`serve` は Docker API のリクエストを解釈せず、ストリームをそのまま中継します。HTTP Upgrade / hijack 後の対話通信、half-close、双方向の backpressure を扱います。`check` は別プロセスとして `docker exec` で実行し、既定で 10 秒間再試行します。各リクエストにも 1 秒のタイムアウトを設けています。
+
+同じ中継は Python の `socket` / `asyncio` でも実装できます。Node.js を選んだ理由は、既存の `Dockerfile.base` が nvm 経由で Node.js 24 を明示的に導入しているためです。Python は明示的な導入対象ではなく、追加依存とイメージの再ビルドを避けるために Node.js の標準モジュールを使用しています。
+
 ## 起動処理と通信制限
 
 `wslc run` は `--cap-add` を提供していないため、そのままでは既存のファイアウォールを初期化できません。そこで内蔵 Docker Engine の `docker` コマンドを使い、既存の `--cap-add=NET_ADMIN --cap-add=NET_RAW` を維持します。AI 起動時のファイアウォール初期化と疎通検証は既存の `ENTRYPOINT` が行います。
@@ -78,15 +104,24 @@ Windows のフォルダーはまず `wslc` で共有し、Docker の `inspect` �
 
 `system session run` は対話用 TTY を作らないため、起動用コンテナは `wslc create --interactive --tty` で作成し、`wslc start --attach --interactive` で端末を接続します。作成・開始・削除を `wslc` にそろえます。以前の「内蔵 Docker で作成し、`wslc` で開始する」方式では、実機で `E_UNEXPECTED` が発生し、コンテナが `created` のまま残りました。
 
-`wslc` に VM 内のパスを Windows のパスとして解釈させないよう、内蔵 Docker の `local` ドライバーで既存の VM ディレクトリを参照する一時ボリュームを作り、起動用コンテナには名前付きボリュームとして渡します。ワークスペースとリポジトリは VM と同じパスにマウントします。リポジトリはワークスペースと同じ共有元の場合を除いて読み取り専用です。
+ワークスペースとリポジトリは、起動用コンテナにも Windows のパスを `--volume` で渡して共有します。マウント先には、先に共有用コンテナの `inspect` で取得した VM 側のパスを指定します。共有用コンテナは起動中ずっと保持するため、Docker が AI コンテナに渡す元の VM パスも有効なままです。リポジトリはワークスペースと同じ共有元の場合を除いて読み取り専用です。
 
-IP・DNS 許可設定の一時ファイルには、起動ごとに作る専用の Docker ボリューム `yumayo-ai-tmp-<ID>` を使います。その `Mountpoint` を取得して起動用コンテナにも同じパスでマウントし、`AICONTAINER_RUNTIME_ROOT` で Bash ランチャーに伝えます。起動用ユーザーだけが読み書きできるよう、準備用の Docker コンテナで所有者とモード `0700` を設定します。通常の Bash 起動では従来どおり `/tmp` を使います。
+Linux 内で共有するデータには、`wslc volume create --driver guest` で作る専用ボリュームを使います。Docker で作ったボリューム名は WSL 側では登録されておらず、`WSLC_E_VOLUME_NOT_FOUND` になります。また、`guest` は Docker の `local` ドライバーとは異なり、実機で `--opt type=none` が拒否されました。`type=none` / `o=bind` / `device=...` は指定しません。
 
-`wslc` が未対応の `volume-nocopy` は、`wslc create` には渡しません。準備用コンテナを内蔵 Docker で実行するときだけ指定します。WSL 側のマウント先にはベースイメージ内にない専用パスを使うため、イメージ内のファイルをコピーする必要がありません。ベースイメージの `/tmp` は共有せず、内容の削除や空であることの確認も不要です。
+ボリュームは次の 2 つです。どちらも共有用コンテナにマウントし、そのコンテナの Docker `inspect` から実際の VM 側パスを取得します。WSL と Docker で同じボリューム名が使えるとは仮定しません。
 
-起動用コンテナには、内蔵 Docker の `/var/run` を専用の読み取り専用パス `/var/run/aicontainer-engine` にマウントし、その中の `docker.sock` を `DOCKER_HOST` に指定します。このディレクトリと生の Docker ソケットを AI コンテナに渡すことはありません。起動用コンテナの UID はイメージの `ubuntu` から取得し、AI とセッションファイルの所有者をそろえます。`wslc create` に `--group-add` がないため、GID には Docker ソケットの実際のグループ ID を指定します。
+- `yumayo-ai-tmp-<ID>`：IP・DNS 許可設定の一時ファイル用です。起動用コンテナにも VM と同じパスでマウントし、`AICONTAINER_RUNTIME_ROOT` で Bash ランチャーに伝えます。通常の Bash 起動は従来どおり `/tmp` を使います。
+- `yumayo-ai-engine-<ID>`：起動用コンテナだけが使う Docker 接続の中継ソケット用です。起動用コンテナでは短いパス `/aicontainer-engine/docker.sock` で参照し、Unix ソケットのパス長制限を避けます。
 
-終了時は、その起動で作成した起動用コンテナ・AI コンテナ・専用ネットワーク・一時ボリューム・フォルダー共有用コンテナの順に後始末します。途中でボリューム作成に失敗した場合も、作成済みのものを回収します。専用の一時ファイル用ボリュームの削除では、残っている許可設定のコピーも削除します。共有用ボリュームは既存ディレクトリへのバインドなので、削除しても Windows 側の作業ファイルは残ります。AI と専用ネットワークは所有者ラベル、一時ボリュームは作成時に記録した名前で対象を絞ります。起動用コンテナには別のラベルを付け、削除は `wslc` だけで行います。他のコンテナ、追加ネットワーク、継続利用する Proxy は削除しません。Windows 自体の強制終了などで後始末できない場合は、`wslc container list --all` で `yumayo-ai-share-*` / `yumayo-ai-launch-*`、`wslc system session run docker volume ls` で `yumayo-ai-engine-*` / `yumayo-ai-tmp-*` / `yumayo-ai-workspace-*` / `yumayo-ai-repository-*` を確認できます。
+準備用の Docker コンテナで、両ボリュームの所有者をイメージの `ubuntu` の UID に、ディレクトリのモードを `0700` に設定します。未対応の `volume-nocopy` は使用しません。マウント先はベースイメージに存在しない専用パスなので、イメージ内の `/tmp` の内容をコピーしたり、削除したりする必要はありません。
+
+中継用コンテナ `yumayo-ai-relay-<ID>` は内蔵 Docker で作成し、生の Docker ソケットと専用ボリュームを接続します。上記の `run-relay.sh` から `docker-socket-relay.cjs` を起動し、API と対話入出力のバイト列を Unix ソケット間で中継します。通信先を制限する AI 用 Docker Socket Proxy とは別の、信頼された起動処理です。中継用コンテナはネットワークなし・非 root で動き、ソケットはモード `0600` にします。Docker ソケットへの接続に必要な実際の GID を使用し、Windows 向け TCP ポートは開きません。AI 起動前に中継経由の `/_ping` を確認し、失敗したら停止して中継のログを表示します。
+
+起動用コンテナには中継ボリュームを読み取り専用で渡します。生の Docker ソケットと中継ボリュームは、AI コンテナには渡しません。AI の通信先制限と、設定した場合の制限付き Docker Socket Proxy は既存の Bash ランチャーが準備します。
+
+終了時は、起動用コンテナ、中継用コンテナ、所有者ラベルで特定した AI コンテナと専用ネットワーク、共有用コンテナ、最後に 2 つの WSL ボリュームを削除します。`wslc volume remove --force` も使用中のボリュームは削除できないため、参照元のコンテナを先に削除します。途中で失敗した場合も、その起動で作成済みのリソースだけを回収します。ボリューム削除によって一時ファイルとソケットは消えますが、Windows 側の作業ファイルは残ります。他のコンテナ、追加ネットワーク、継続利用する Proxy は削除しません。
+
+Windows の強制終了などで後始末できなかった場合は、`wslc container list --all` で `yumayo-ai-share-*` / `yumayo-ai-launch-*`、`wslc system session run docker ps -a` で `yumayo-ai-relay-*`、`wslc volume list` で `yumayo-ai-engine-*` / `yumayo-ai-tmp-*` を確認できます。古い実装が作成した Docker ボリュームは別管理なので、`wslc system session run docker volume ls` で確認します。
 
 `Starting interactive launcher` の後で失敗した場合は、起動用コンテナの作成後、端末の接続または起動したプロセスで失敗しています。削除する前に Docker の実行状態を `Launcher state before cleanup` として表示します。`Status=created` ならコンテナ内の起動処理はまだ始まっていません。`E_UNEXPECTED` だけでは原因を特定できないため、WSL 側の終了コードとこの状態を合わせて確認してください。診断のために読み取る情報は `.State` に限定し、環境変数を含む inspect 全体は表示しません。
 
@@ -139,11 +174,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\test\test_wsl_containe
 ```
 
 ```sh
-# Linux 上の Bash / Docker モックを使う起動テストと既存テスト
+# Linux 上の Bash / Docker モックと Unix ソケット中継のテスト（Node.js が必要）
 python3 -m unittest discover -s test -p 'test_*.py'
 ```
 
-実機では未導入時の UAC・再起動、旧版からの更新、イメージビルド、一時ボリュームを介した VM パスの共有、`wslc` で作成した起動用コンテナへの端末接続、ファイアウォールの疎通検証、セッションの保存、終了時の後始末を通して確認する必要があります。
+実機では未導入時の UAC・再起動、旧版からの更新、イメージビルド、WSL ボリュームと Windows フォルダーの共有、中継経由の Docker API 接続、`wslc` で作成した起動用コンテナへの端末接続、ファイアウォールの疎通検証、セッションの保存、終了時の後始末を通して確認する必要があります。
 
 ## WSL の導入を繰り返し検証する
 

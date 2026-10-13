@@ -39,10 +39,24 @@ function Reset-Fixture {
     $script:launcherUser = '1000'
     $script:badRuntimePath = $false
     $script:failRuntimeInit = $false
+    $script:failRelayCheck = $false
+    $script:failRelayStart = $false
     $script:failRunnerCreate = $false
     $script:failVolumeCreateAt = 0
     $script:volumeCreateCount = 0
     $script:failVolumeRemove = $false
+    $script:registeredVolumes = @{}
+    $script:volumeReferences = @{}
+    $script:runtimeMountType = 'volume'
+}
+
+function Assert-TestWslVolumes {
+    param([string] $Name)
+    foreach ($volume in $script:volumeReferences[$Name]) {
+        if (-not $script:registeredVolumes.ContainsKey($volume)) {
+            throw "WSLC_E_VOLUME_NOT_FOUND: $volume"
+        }
+    }
 }
 
 function Find-AiWslExecutable {
@@ -81,18 +95,34 @@ function Invoke-AiWslCommand {
     $script:calls.Add([pscustomobject] @{
         Kind = 'wslc'; Arguments = $Arguments; Directory = (Get-Location).Path
     })
+    if ($Arguments[0] -eq 'volume' -and $Arguments -contains '--opt') { throw 'Unsupported WSL volume driver option' }
+    if ($script:failRelayCheck -and $Arguments -contains 'check') { throw 'Relay check failed' }
+    if ($script:failRelayStart -and $Arguments[0] -eq 'system' -and $Arguments -contains 'start' -and $Arguments[-1] -like 'yumayo-ai-relay-*') { throw 'Relay start failed' }
     if ($script:failImage -and $Arguments -contains $script:failImage) { throw 'Build failed' }
     if ($script:failRuntimeInit -and $Arguments -contains 'install') { throw 'Runtime initialization failed' }
     if ($script:failCarrierStart -and $Arguments[0] -eq 'start') { throw 'Share start failed' }
     if ($script:failRunnerCreate -and $Arguments[0] -eq 'create' -and $Arguments[2] -like 'yumayo-ai-launch-*') {
         throw 'Launcher create failed'
     }
-    if (($Arguments -join ' ') -match '^system session run docker volume create ') {
+    if (($Arguments -join ' ') -match '^(system session run docker )?volume create ') {
         $script:volumeCreateCount++
         if ($script:volumeCreateCount -eq $script:failVolumeCreateAt) { throw 'Volume create failed' }
+        # Docker-created names are deliberately invisible to native wslc.
+        if ($Arguments[0] -eq 'volume') { $script:registeredVolumes[$Arguments[-1]] = $true }
     }
-    if ($script:failVolumeRemove -and ($Arguments -join ' ') -match '^system session run docker volume rm ') {
-        throw 'Volume remove failed'
+    if ($Arguments[0] -eq 'create') {
+        $script:volumeReferences[$Arguments[2]] = @($Arguments | ForEach-Object {
+            if ($_ -match '^type=volume,source=([^,]+),') { $Matches[1] }
+        })
+    }
+    if ($Arguments[0] -eq 'start') { Assert-TestWslVolumes $Arguments[-1] }
+    if ($Arguments[0] -eq 'rm') { $script:volumeReferences.Remove($Arguments[-1]) }
+    if (($Arguments -join ' ') -match '^volume remove ') {
+        if ($script:failVolumeRemove) { throw 'Volume remove failed' }
+        foreach ($references in $script:volumeReferences.Values) {
+            if ($references -contains $Arguments[-1]) { throw 'Volume still referenced by a WSL container' }
+        }
+        $script:registeredVolumes.Remove($Arguments[-1])
     }
 }
 
@@ -100,17 +130,21 @@ function Read-AiWslCommand {
     param([string] $Wslc, [string[]] $Arguments)
     $script:calls.Add([pscustomobject] @{ Kind = 'read'; Arguments = $Arguments })
     if ($Arguments -contains 'volume' -and $Arguments -contains 'inspect') {
-        if ($script:badRuntimePath) { return '/var/lib/docker/volumes/../unrelated/_data' }
-        return "/var/lib/docker/volumes/$($Arguments[-1])/_data"
+        throw 'Do not assume that a WSL volume name also exists in Docker.'
     }
     if ($Arguments -contains 'inspect') {
         $workspaceSource = '/mnt/workspace-share'
         if ($script:badMount) { $workspaceSource = 'C:\Windows\workspace' }
         $repositorySource = '/mnt/repository-share'
         if ($script:sameMount) { $repositorySource = $workspaceSource }
+        $runId = $Arguments[-1].Substring('yumayo-ai-share-'.Length)
+        $runtimeSource = "/var/lib/docker/volumes/engine-volume-$runId/_data"
+        if ($script:badRuntimePath) { $runtimeSource = '/var/lib/docker/volumes/../unrelated/_data' }
         return ConvertTo-Json -Depth 4 -InputObject @(@{ Mounts = @(
             @{ Type = 'bind'; Destination = '/aicontainer/workspace'; Source = $workspaceSource },
-            @{ Type = 'bind'; Destination = '/aicontainer/repository'; Source = $repositorySource }
+            @{ Type = 'bind'; Destination = '/aicontainer/repository'; Source = $repositorySource },
+            @{ Type = $script:runtimeMountType; Destination = "/aicontainer/runtime-$runId"; Source = $runtimeSource },
+            @{ Type = $script:runtimeMountType; Destination = "/aicontainer/engine-$runId"; Source = "/mnt/wsl/volume/sock-$runId" }
         ) })
     }
     if ($Arguments -contains 'stat') { return '998' }
@@ -123,6 +157,7 @@ function Read-AiWslCommand {
 function Invoke-AiWslInteractive {
     param([string] $Wslc, [string] $Name)
     $script:calls.Add([pscustomobject] @{ Kind = 'interactive'; Arguments = @('start', $Name) })
+    Assert-TestWslVolumes $Name
     $script:AiWslExitCode = 17
 }
 
@@ -292,24 +327,33 @@ try {
     $scripts = Join-Path $temporary 'scripts'
     $null = New-Item -ItemType Directory -Path $scripts
     [IO.File]::WriteAllText((Join-Path $scripts 'wsl-launch.sh'), "# fixture`n")
+    $relayScripts = Join-Path $scripts 'wsl-docker-relay'
+    $null = New-Item -ItemType Directory -Path $relayScripts
+    [IO.File]::WriteAllText((Join-Path $relayScripts 'run-relay.sh'), "# fixture`n")
     [IO.File]::WriteAllText((Join-Path $temporary '.bash_ai_container'), "# fixture`n")
+    Reset-Fixture
+    Invoke-AiWslCommand 'wslc.exe' @('system', 'session', 'run', 'docker', 'volume', 'create', 'docker-only')
+    Invoke-AiWslCommand 'wslc.exe' @('create', '--name', 'volume-check', '--mount', 'type=volume,source=docker-only,target=/probe')
+    Assert-Throws { Invoke-AiWslInteractive 'wslc.exe' 'volume-check' } 'WSLC_E_VOLUME_NOT_FOUND'
+
     Reset-Fixture
     Start-AiWslContainer -Wslc 'wslc.exe' -Repository $temporary -Workspace $temporary -Tool codex
     Assert-True ($script:AiWslExitCode -eq 17) 'Cleanup must preserve the interactive process exit code.'
     $create = @($script:calls | Where-Object { ($_.Arguments -join ' ') -match '^create --name yumayo-ai-launch-' })
     Assert-True ($create.Count -eq 1) 'Use native wslc creation for the launcher attached by wslc.'
-    Assert-True (@($script:calls | Where-Object { ($_.Arguments -join ' ') -match '^system session run docker create ' }).Count -eq 0) 'Do not mix Docker creation with native wslc attachment.'
+    Assert-True (@($script:calls | Where-Object { ($_.Arguments -join ' ') -match '^system session run docker create --name yumayo-ai-launch-' }).Count -eq 0) 'Do not mix Docker creation with native wslc attachment.'
     $arguments = $create[0].Arguments
     $runner = $arguments[2]
     $runId = $runner.Substring('yumayo-ai-launch-'.Length)
     $runtimeVolumeName = "yumayo-ai-tmp-$runId"
-    $runtimeSource = "/var/lib/docker/volumes/$runtimeVolumeName/_data"
+    $runtimeSource = "/var/lib/docker/volumes/engine-volume-$runId/_data"
     Assert-True ($arguments -contains '1000:998' -and -not ($arguments -contains '--group-add')) 'Keep the AI user UID and use the actual socket GID with supported wslc options.'
     Assert-True ($arguments -contains '--interactive' -and $arguments -contains '--tty') 'Prepare the launcher terminal before attachment.'
     Assert-True ($arguments -contains "io.yumayo.aicontainer.wsl-launch=$runId" -and -not ($arguments -contains "io.yumayo.aicontainer.wsl-run=$runId")) 'Keep the native launcher out of Docker-only child cleanup.'
-    Assert-True ($arguments -contains 'DOCKER_HOST=unix:///var/run/aicontainer-engine/docker.sock') 'Use the socket exposed at the dedicated launcher mount.'
-    $volumes = @($script:calls | Where-Object { ($_.Arguments -join ' ') -match '^system session run docker volume create ' })
-    Assert-True ($volumes.Count -eq 4) 'Prepare local volumes for the engine socket directory, temporary files, workspace and repository.'
+    Assert-True ($arguments -contains 'DOCKER_HOST=unix:///aicontainer-engine/docker.sock') 'Use the socket exposed at the dedicated launcher mount.'
+    $volumes = @($script:calls | Where-Object { ($_.Arguments -join ' ') -match '^volume create ' })
+    Assert-True ($volumes.Count -eq 2) 'Register the engine relay and runtime volumes with WSL.'
+    Assert-True (@($script:calls | Where-Object { ($_.Arguments -join ' ') -match '^system session run docker volume ' }).Count -eq 0) 'Manage WSL volume names only through the native WSL registry.'
     $runtimeVolume = @($volumes | Where-Object { $_.Arguments[-1] -eq $runtimeVolumeName })
     Assert-True ($runtimeVolume.Count -eq 1 -and -not ($runtimeVolume[0].Arguments -contains '--opt')) 'Use a dedicated runtime volume rather than a bind of VM /tmp.'
     Assert-True ($runtimeVolume[0].Arguments -contains "io.yumayo.aicontainer.wsl-run=$runId") 'Label the dedicated runtime volume with this invocation.'
@@ -318,22 +362,22 @@ try {
     $initialize = @($script:calls | Where-Object { $_.Arguments -contains 'install' })
     Assert-True ($initialize.Count -eq 1) 'Initialize the runtime volume before starting the non-root launcher.'
     Assert-True (($initialize[0].Arguments -join ' ') -match '^system session run docker run ') 'Use Docker for the volume initialization helper.'
-    Assert-True ($initialize[0].Arguments -contains "type=volume,source=$runtimeVolumeName,target=/aicontainer-runtime,volume-nocopy") 'Disable image copying on the supported Docker initialization command.'
-    Assert-True (($initialize[0].Arguments -join ' ') -match '-d -m 0700 -o 1000 -g 998 /aicontainer-runtime$') 'Give only the launcher user access to runtime files.'
-    $expectedBindings = @(
-        @{ Kind = 'engine'; Source = '/var/run'; Target = '/var/run/aicontainer-engine'; Suffix = ',readonly' },
-        @{ Kind = 'workspace'; Source = '/mnt/workspace-share'; Target = '/mnt/workspace-share'; Suffix = '' },
-        @{ Kind = 'repository'; Source = '/mnt/repository-share'; Target = '/mnt/repository-share'; Suffix = ',readonly' }
-    )
-    foreach ($binding in $expectedBindings) {
-        $name = "yumayo-ai-$($binding.Kind)-$runId"
-        $volume = @($volumes | Where-Object { $_.Arguments[-1] -eq $name })
-        Assert-True ($volume.Count -eq 1) "Create only one volume for $($binding.Kind)."
-        foreach ($value in @('local', 'type=none', 'o=bind', "device=$($binding.Source)", "io.yumayo.aicontainer.wsl-run=$runId")) {
-            Assert-True ($volume[0].Arguments -contains $value) "Use an owned bind volume with $value."
-        }
-        Assert-True ($arguments -contains "type=volume,source=$name,target=$($binding.Target)$($binding.Suffix)") 'Preserve VM paths and read-only access with supported mount options.'
+    Assert-True ($initialize[0].Arguments -contains "type=bind,source=$runtimeSource,target=/aicontainer-runtime") 'Initialize the observed backing path without assuming WSL and Docker volume names match.'
+    Assert-True (($initialize[0].Arguments -join ' ') -match '-d -m 0700 -o 1000 -g 998 /aicontainer-runtime /aicontainer-engine$') 'Give only the launcher user access to runtime files.'
+    foreach ($volume in $volumes) {
+        Assert-True ($volume.Arguments -contains 'guest' -and -not ($volume.Arguments -contains '--opt')) 'Use plain guest volumes without Docker local-driver options.'
     }
+    Assert-True ($arguments -contains "type=volume,source=yumayo-ai-engine-$runId,target=/aicontainer-engine,readonly") 'Expose only the private relay volume to the launcher.'
+    Assert-True ($arguments -contains "${temporary}:/mnt/workspace-share") 'Share the Windows workspace at the Docker-visible destination.'
+    Assert-True ($arguments -contains "${temporary}:/mnt/repository-share:ro") 'Keep the repository share read-only.'
+    $relay = @($script:calls | Where-Object { ($_.Arguments -join ' ') -match '^system session run docker create --name yumayo-ai-relay-' })
+    Assert-True ($relay.Count -eq 1) 'Create one trusted relay with the bundled Docker engine.'
+    Assert-True ($relay[0].Arguments -contains "type=bind,source=/mnt/wsl/volume/sock-$runId,target=/aicontainer-engine") 'Create the relay socket inside the observed WSL volume path.'
+    Assert-True ($relay[0].Arguments -contains 'type=bind,source=/var/run/docker.sock,target=/aicontainer-upstream/docker.sock,readonly') 'Only the trusted relay gets the raw engine socket.'
+    Assert-True ($relay[0].Arguments -contains 'none' -and $relay[0].Arguments -contains '1000:998') 'The relay uses a non-root identity and no network.'
+    Assert-True (@($arguments | Where-Object { $_ -like '*aicontainer-upstream*' -or $_ -like '*source=/var/run*' }).Count -eq 0) 'Never expose the upstream socket directory to the launcher.'
+    $relayCheck = @($script:calls | Where-Object { $_.Arguments -contains 'check' })
+    Assert-True ($relayCheck.Count -eq 1) 'Check Docker API connectivity through the relay before attachment.'
     Assert-True (@($arguments | Where-Object { $_ -like '*volume-nocopy*' }).Count -eq 0) 'Never pass unsupported volume-nocopy to wslc.'
     Assert-True (@($arguments | Where-Object { $_ -match 'target=/tmp(,|$)' }).Count -eq 0) 'Leave the base image /tmp private instead of mounting over its build artifacts.'
     Assert-True (@($script:calls | Where-Object { $_.Arguments -contains 'find' }).Count -eq 0) 'Do not require the base image /tmp to be empty.'
@@ -347,13 +391,15 @@ try {
     Assert-True ($operations -contains 'system session run docker network rm abcdef123456') 'Clean up owned dedicated networks.'
     Assert-True ($operations -contains "rm --force $runner") 'Remove the launcher through its native wslc lifecycle.'
     Assert-True ([array]::IndexOf($operations, "rm --force $runner") -lt [array]::IndexOf($operations, 'system session run docker rm --force 123456789abc')) 'Stop the launcher before querying/removing its children.'
-    $removedVolumes = @($script:calls | Where-Object { ($_.Arguments -join ' ') -match '^system session run docker volume rm ' })
-    Assert-True ($removedVolumes.Count -eq $volumes.Count) 'Remove every temporary bind volume after attachment ends.'
+    $removedVolumes = @($script:calls | Where-Object { ($_.Arguments -join ' ') -match '^volume remove ' })
+    Assert-True ($removedVolumes.Count -eq $volumes.Count) 'Remove both registered volumes after attachment ends.'
     foreach ($volume in $volumes) {
-        $remove = "system session run docker volume rm $($volume.Arguments[-1])"
+        $remove = "volume remove --force $($volume.Arguments[-1])"
         Assert-True ([array]::IndexOf($operations, $remove) -gt [array]::IndexOf($operations, 'system session run docker rm --force 123456789abc')) 'Release volumes after launcher and AI cleanup.'
     }
-    Assert-True ($operations[-1] -match '^rm --force yumayo-ai-share-') 'Release Windows shares last.'
+    Assert-True ($operations[-3] -eq "rm --force yumayo-ai-share-$runId") 'Release the carrier before removing either volume.'
+    Assert-True ([array]::IndexOf($operations, "system session run docker rm --force yumayo-ai-relay-$runId") -lt [array]::IndexOf($operations, "volume remove --force $runtimeVolumeName")) 'Release the relay before removing its socket volume.'
+    Assert-True ($script:registeredVolumes.Count -eq 0 -and $script:volumeReferences.Count -eq 0) 'Leave no registered volumes or native containers after cleanup.'
     $filters = @($script:calls | Where-Object { $_.Arguments -contains '--filter' })
     Assert-True ($filters.Count -eq 2) 'Filter both container and network cleanup.'
     foreach ($filter in $filters) {
@@ -364,9 +410,14 @@ try {
     $script:sameMount = $true
     Start-AiWslContainer -Wslc 'wslc.exe' -Repository $temporary -Workspace $temporary
     $create = @($script:calls | Where-Object { ($_.Arguments -join ' ') -match '^create --name yumayo-ai-launch-' })
-    $sharedBinds = @($create[0].Arguments | Where-Object { $_ -like '*target=/mnt/workspace-share*' })
+    $sharedBinds = @($create[0].Arguments | Where-Object { $_ -eq "${temporary}:/mnt/workspace-share" })
     Assert-True ($sharedBinds.Count -eq 1) 'Deduplicate mounts when repository and workspace share the same source.'
-    Assert-True ($script:volumeCreateCount -eq 3) 'Do not create a redundant repository volume for the same VM source.'
+    Assert-True ($script:volumeCreateCount -eq 2) 'Windows folders need no guest volumes.'
+
+    Reset-Fixture
+    $script:runtimeMountType = 'bind'
+    Start-AiWslContainer -Wslc 'wslc.exe' -Repository $temporary -Workspace $temporary
+    Assert-True ($script:AiWslExitCode -eq 17 -and $script:registeredVolumes.Count -eq 0) 'Accept a WSL runtime volume exposed to Docker as a bind mount.'
 
     Reset-Fixture
     $script:launcherUser = '1234'
@@ -377,61 +428,72 @@ try {
     Reset-Fixture
     $script:launcherUser = 'not a uid'
     Assert-Throws { Start-AiWslContainer -Wslc 'wslc.exe' -Repository $temporary -Workspace $temporary } 'launcher user ID'
-    Assert-True ($script:volumeCreateCount -eq 0) 'Invalid user identity must stop before creating volumes.'
+    Assert-True ($script:volumeCreateCount -eq 2 -and $script:registeredVolumes.Count -eq 0) 'On invalid user identity, clean up both registered volumes.'
     Assert-True (@($script:calls | Where-Object { $_.Kind -eq 'interactive' }).Count -eq 0) 'Never attach with an invalid user identity.'
 
     Reset-Fixture
     $script:badRuntimePath = $true
-    Assert-Throws { Start-AiWslContainer -Wslc 'wslc.exe' -Repository $temporary -Workspace $temporary } 'runtime volume path'
+    Assert-Throws { Start-AiWslContainer -Wslc 'wslc.exe' -Repository $temporary -Workspace $temporary } 'WSL volume backing path'
     Assert-True (@($script:calls | Where-Object { $_.Arguments -contains 'install' -or $_.Kind -eq 'interactive' }).Count -eq 0) 'Reject invalid VM paths before initializing or using the volume.'
-    Assert-True (@($script:calls | Where-Object { ($_.Arguments -join ' ') -match '^system session run docker volume rm ' }).Count -eq 1) 'Remove the runtime volume on inspection failure.'
-    Assert-True (($script:calls[-1].Arguments -join ' ') -match '^rm --force yumayo-ai-share-') 'Release shares after runtime path failure.'
+    Assert-True (@($script:calls | Where-Object { ($_.Arguments -join ' ') -match '^volume remove ' }).Count -eq 2) 'Remove both volumes on inspection failure.'
+    Assert-True (($script:calls[-3].Arguments -join ' ') -match '^rm --force yumayo-ai-share-') 'Release shares before the runtime volume after runtime path failure.'
 
     Reset-Fixture
     $script:failRuntimeInit = $true
     Assert-Throws { Start-AiWslContainer -Wslc 'wslc.exe' -Repository $temporary -Workspace $temporary } 'Runtime initialization failed'
     Assert-True (@($script:calls | Where-Object { $_.Kind -eq 'interactive' }).Count -eq 0) 'Do not start when the runtime volume cannot be prepared for the launcher user.'
-    Assert-True (@($script:calls | Where-Object { ($_.Arguments -join ' ') -match '^system session run docker volume rm ' }).Count -eq 1) 'Remove the runtime volume on initialization failure.'
-    Assert-True (($script:calls[-1].Arguments -join ' ') -match '^rm --force yumayo-ai-share-') 'Release shares after runtime initialization failure.'
+    Assert-True (@($script:calls | Where-Object { ($_.Arguments -join ' ') -match '^volume remove ' }).Count -eq 2) 'Remove both volumes on initialization failure.'
+    Assert-True (($script:calls[-3].Arguments -join ' ') -match '^rm --force yumayo-ai-share-') 'Release shares before the runtime volume after runtime initialization failure.'
 
-    foreach ($failureAt in @(1, 3)) {
+    foreach ($failureAt in @(1, 2)) {
         Reset-Fixture
         $script:failVolumeCreateAt = $failureAt
         Assert-Throws { Start-AiWslContainer -Wslc 'wslc.exe' -Repository $temporary -Workspace $temporary } 'Volume create failed'
-        $volumes = @($script:calls | Where-Object { ($_.Arguments -join ' ') -match '^system session run docker volume create ' })
-        $removedVolumes = @($script:calls | Where-Object { ($_.Arguments -join ' ') -match '^system session run docker volume rm ' })
+        $volumes = @($script:calls | Where-Object { ($_.Arguments -join ' ') -match '^volume create ' })
+        $removedVolumes = @($script:calls | Where-Object { ($_.Arguments -join ' ') -match '^volume remove ' })
         Assert-True ($removedVolumes.Count -eq ($failureAt - 1)) 'On partial failure, remove only successfully created volumes.'
         for ($i = 0; $i -lt $removedVolumes.Count; $i++) {
-            Assert-True ($removedVolumes[$i].Arguments[-1] -eq $volumes[$i].Arguments[-1]) 'Clean up recorded volumes from this invocation only.'
+            $removedName = $removedVolumes[$i].Arguments[-1]
+            Assert-True (@($volumes | Select-Object -First ($failureAt - 1) | Where-Object { $_.Arguments[-1] -eq $removedName }).Count -eq 1) 'Clean up recorded volumes from this invocation only.'
         }
         Assert-True (@($script:calls | Where-Object { $_.Kind -eq 'interactive' }).Count -eq 0) 'Do not attach after mount preparation fails.'
-        Assert-True (($script:calls[-1].Arguments -join ' ') -match '^rm --force yumayo-ai-share-') 'Release shares after a partial volume failure.'
+        Assert-True ($script:registeredVolumes.Count -eq 0 -and $script:volumeReferences.Count -eq 0) 'Release all successfully created resources after a partial volume failure.'
+    }
+
+    foreach ($failure in @('start', 'check')) {
+        Reset-Fixture
+        $script:failRelayStart = $failure -eq 'start'
+        $script:failRelayCheck = $failure -eq 'check'
+        Assert-Throws { Start-AiWslContainer -Wslc 'wslc.exe' -Repository $temporary -Workspace $temporary } '(Relay start failed|Docker relay is not ready)'
+        Assert-True (@($script:calls | Where-Object { $_.Kind -eq 'interactive' }).Count -eq 0) 'Never attach without a working Docker relay.'
+        Assert-True (@($script:calls | Where-Object { ($_.Arguments -join ' ') -match '^system session run docker rm --force yumayo-ai-relay-' }).Count -eq 1) 'Clean up the relay even if its start or readiness check fails.'
+        Assert-True ($script:registeredVolumes.Count -eq 0 -and $script:volumeReferences.Count -eq 0) 'Release all WSL resources on relay failure.'
     }
 
     Reset-Fixture
     $script:failRunnerCreate = $true
     Assert-Throws { Start-AiWslContainer -Wslc 'wslc.exe' -Repository $temporary -Workspace $temporary } 'Launcher create failed'
-    Assert-True (@($script:calls | Where-Object { ($_.Arguments -join ' ') -match '^system session run docker volume rm ' }).Count -eq 4) 'Clean up prepared volumes if native launcher creation fails.'
+    Assert-True (@($script:calls | Where-Object { ($_.Arguments -join ' ') -match '^volume remove ' }).Count -eq 2) 'Clean up prepared volumes if native launcher creation fails.'
     Assert-True (@($script:calls | Where-Object { $_.Kind -eq 'interactive' }).Count -eq 0) 'Never attach after native creation fails.'
-    Assert-True (($script:calls[-1].Arguments -join ' ') -match '^rm --force yumayo-ai-share-') 'Release shares after native creation failure.'
+    Assert-True (($script:calls[-3].Arguments -join ' ') -match '^rm --force yumayo-ai-share-') 'Release shares before the runtime volume after native creation failure.'
 
     Reset-Fixture
     $script:failVolumeRemove = $true
     Start-AiWslContainer -Wslc 'wslc.exe' -Repository $temporary -Workspace $temporary
     Assert-True ($script:AiWslExitCode -eq 17) 'Volume cleanup errors must not replace the interactive exit code.'
-    Assert-True (@($script:calls | Where-Object { ($_.Arguments -join ' ') -match '^system session run docker volume rm ' }).Count -eq 4) 'One volume removal failure must not prevent the remaining removal attempts.'
-    Assert-True (($script:calls[-1].Arguments -join ' ') -match '^rm --force yumayo-ai-share-') 'Attempt share cleanup after volume cleanup errors.'
+    Assert-True (@($script:calls | Where-Object { ($_.Arguments -join ' ') -match '^volume remove ' }).Count -eq 2) 'One volume removal failure must not prevent the remaining removal attempts.'
+    Assert-True (($script:calls[-3].Arguments -join ' ') -match '^rm --force yumayo-ai-share-') 'Release the carrier before attempting volume cleanup.'
 
     Reset-Fixture
     $script:badMount = $true
     Assert-Throws { Start-AiWslContainer -Wslc 'wslc.exe' -Repository $temporary -Workspace $temporary } 'VM bind source'
     Assert-True (@($script:calls | Where-Object { $_.Kind -eq 'interactive' }).Count -eq 0) 'Invalid mappings must stop before launching.'
-    Assert-True (($script:calls[-1].Arguments -join ' ') -match '^rm --force yumayo-ai-share-') 'Release shares on inspection failure.'
+    Assert-True (($script:calls[-3].Arguments -join ' ') -match '^rm --force yumayo-ai-share-') 'Release shares before the runtime volume on inspection failure.'
 
     Reset-Fixture
     $script:failCarrierStart = $true
     Assert-Throws { Start-AiWslContainer -Wslc 'wslc.exe' -Repository $temporary -Workspace $temporary } 'Share start failed'
-    Assert-True (($script:calls[-1].Arguments -join ' ') -match '^rm --force yumayo-ai-share-') 'Release a carrier whose start failed.'
+    Assert-True (($script:calls[-3].Arguments -join ' ') -match '^rm --force yumayo-ai-share-') 'Release a carrier whose start failed before removing its runtime volume.'
 
     & {
         Reset-Fixture

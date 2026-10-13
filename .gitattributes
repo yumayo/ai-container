@@ -5,5 +5,7 @@
 /docker/aicontainer/system-prompt.md text eol=lf
 /.bash_ai_container text eol=lf
 /scripts/*.sh text eol=lf
+/scripts/wsl-docker-relay/*.sh text eol=lf
+/scripts/wsl-docker-relay/*.cjs text eol=lf
 /docker/docker-proxy/Dockerfile text eol=lf
 /docker/docker-proxy/*.sh text eol=lf

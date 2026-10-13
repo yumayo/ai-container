@@ -257,6 +257,20 @@ function Get-AiWslMountSource {
     return $mountEntries[0].Source
 }
 
+function Get-AiWslVolumeMountSource {
+    param([object[]] $Mounts, [string] $Destination)
+    # A WSL volume may be presented to Docker as a bind or a volume. Its engine
+    # name and backing path need not match the name registered with wslc.
+    $mountEntries = @($Mounts | Where-Object {
+        $_.Destination -eq $Destination -and $_.Type -in @('bind', 'volume')
+    })
+    if ($mountEntries.Count -ne 1 -or $mountEntries[0].Source -notmatch '^/[a-zA-Z0-9_{}./-]+$' -or
+        $mountEntries[0].Source -match '(^|/)\.\.(/|$)') {
+        throw "Could not determine the WSL volume backing path for $Destination."
+    }
+    return $mountEntries[0].Source
+}
+
 function Invoke-AiWslInteractive {
     param([string] $Wslc, [string] $Name)
     $PSNativeCommandUseErrorActionPreference = $false
@@ -294,7 +308,7 @@ function Start-AiWslContainer {
     }
     $Workspace = $workspaceItem.FullName
     $Repository = (Get-Item -LiteralPath $Repository -ErrorAction Stop).FullName
-    foreach ($file in @('.bash_ai_container', 'scripts/wsl-launch.sh')) {
+    foreach ($file in @('.bash_ai_container', 'scripts/wsl-launch.sh', 'scripts/wsl-docker-relay/run-relay.sh')) {
         if ([IO.File]::ReadAllText((Join-Path $Repository $file)).Contains("`r")) {
             throw "CRLF found in $file. Restore LF line endings before starting."
         }
@@ -303,10 +317,16 @@ function Start-AiWslContainer {
     $runId = [guid]::NewGuid().ToString('N')
     $carrier = "yumayo-ai-share-$runId"
     $runner = "yumayo-ai-launch-$runId"
+    $relay = "yumayo-ai-relay-$runId"
+    $runtimeVolume = "yumayo-ai-tmp-$runId"
+    $engineVolume = "yumayo-ai-engine-$runId"
+    $runtimeDestination = "/aicontainer/runtime-$runId"
+    $engineDestination = "/aicontainer/engine-$runId"
     $owner = "io.yumayo.aicontainer.wsl-run=$runId"
     $docker = @('system', 'session', 'run', 'docker')
     $carrierCreated = $false
     $runnerCreated = $false
+    $relayCreated = $false
     $createdVolumes = New-Object 'System.Collections.Generic.List[string]'
     $script:AiWslExitCode = 1
     try {
@@ -318,12 +338,21 @@ function Start-AiWslContainer {
             'yumayo-ai', '-c', 'iptables -S && ip6tables -S && ipset list'
         ))
 
+        # Register with WSL before using the volume in a native container.
+        # guest does not accept Docker local-driver options (type/o/device).
+        foreach ($volume in @($runtimeVolume, $engineVolume)) {
+            Invoke-AiWslCommand $Wslc @('volume', 'create', '--driver', 'guest', '--label', $owner, $volume)
+            $createdVolumes.Add($volume)
+        }
+
         # Keep WSL's Windows/virtiofs shares alive while the nested launcher runs.
         # This container runs only sleep; it has no Docker socket or AI process.
         Invoke-AiWslCommand $Wslc @(
             'create', '--name', $carrier, '--network', 'none',
             '--volume', "${Workspace}:/aicontainer/workspace",
             '--volume', "${Repository}:/aicontainer/repository:ro",
+            '--mount', "type=volume,source=$runtimeVolume,target=$runtimeDestination",
+            '--mount', "type=volume,source=$engineVolume,target=$engineDestination",
             '--entrypoint', '/bin/sleep', 'yumayo-ai-base', 'infinity'
         )
         $carrierCreated = $true
@@ -331,6 +360,8 @@ function Start-AiWslContainer {
         $inspection = @(ConvertFrom-Json (Read-AiWslCommand $Wslc ($docker + @('inspect', $carrier))))
         $workspaceSource = Get-AiWslMountSource $inspection[0].Mounts '/aicontainer/workspace'
         $repositorySource = Get-AiWslMountSource $inspection[0].Mounts '/aicontainer/repository'
+        $runtimeSource = Get-AiWslVolumeMountSource $inspection[0].Mounts $runtimeDestination
+        $engineSource = Get-AiWslVolumeMountSource $inspection[0].Mounts $engineDestination
         $socketGroup = (Read-AiWslCommand $Wslc @('system', 'session', 'run', 'stat', '-c', '%g', '/var/run/docker.sock')).Trim()
         if ($socketGroup -notmatch '^\d+$') { throw 'Could not determine the bundled Docker socket group.' }
         $launcherUser = (Read-AiWslCommand $Wslc ($docker + @(
@@ -338,57 +369,59 @@ function Start-AiWslContainer {
         ))).Trim()
         if ($launcherUser -notmatch '^\d+$') { throw 'Could not determine the launcher user ID.' }
 
-        # Give firewall snapshots their own volume, not the VM's entire /tmp.
-        # Mount it at its daemon-side path so nested Docker bind mounts resolve.
-        $runtimeVolume = "yumayo-ai-tmp-$runId"
-        Invoke-AiWslCommand $Wslc ($docker + @(
-            'volume', 'create', '--driver', 'local', '--label', $owner, $runtimeVolume
-        ))
-        $createdVolumes.Add($runtimeVolume)
-        $runtimeSource = (Read-AiWslCommand $Wslc ($docker + @(
-            'volume', 'inspect', '--format', '{{.Mountpoint}}', $runtimeVolume
-        ))).Trim()
-        $runtimePattern = '^/[a-zA-Z0-9_./-]+/' + [regex]::Escape($runtimeVolume) + '/_data$'
-        if ($runtimeSource -notmatch $runtimePattern -or $runtimeSource -match '(^|/)\.\.(/|$)') {
-            throw 'Could not determine the runtime volume path in the WSL VM.'
-        }
-        # Only this Docker invocation uses volume-nocopy; native wslc lacks it.
+        # WSL has now mounted the runtime volume. Use its observed VM bind path
+        # with Docker; do not look up the WSL volume name in Docker's registry.
         # Initialize ownership without exposing the workspace or engine socket.
         Invoke-AiWslCommand $Wslc ($docker + @(
             'run', '--rm', '--network', 'none', '--user', '0',
-            '--mount', "type=volume,source=$runtimeVolume,target=/aicontainer-runtime,volume-nocopy",
+            '--mount', "type=bind,source=$runtimeSource,target=/aicontainer-runtime",
+            '--mount', "type=bind,source=$engineSource,target=/aicontainer-engine",
             '--entrypoint', 'install', 'yumayo-ai-base',
-            '-d', '-m', '0700', '-o', $launcherUser, '-g', $socketGroup, '/aicontainer-runtime'
+            '-d', '-m', '0700', '-o', $launcherUser, '-g', $socketGroup, '/aicontainer-runtime', '/aicontainer-engine'
         ))
 
-        # The launcher and daemon must see identical paths for all bind mounts,
-        # including the legacy launcher's read-only firewall snapshots.
-        # wslc interprets bind sources as Windows paths. Local-driver volumes
-        # refer to the existing VM directories without another path translation.
-        # A volume root must be a directory, so expose the socket's parent at a
-        # separate, read-only path rather than overlaying the launcher's /run.
-        $bindings = @(
-            @{ Name = "yumayo-ai-engine-$runId"; Source = '/var/run'; Target = '/var/run/aicontainer-engine'; ReadOnly = $true },
-            @{ Name = "yumayo-ai-workspace-$runId"; Source = $workspaceSource; Target = $workspaceSource; ReadOnly = $false }
-        )
-        if ($repositorySource -ne $workspaceSource) {
-            $bindings += @{ Name = "yumayo-ai-repository-$runId"; Source = $repositorySource; Target = $repositorySource; ReadOnly = $true }
-        }
-        # The unique target is absent in the image, so wslc's default volume
-        # population cannot copy image files into this runtime volume.
-        $mountArguments = @('--mount', "type=volume,source=$runtimeVolume,target=$runtimeSource")
-        foreach ($binding in $bindings) {
+        # Only this trusted relay sees the raw engine socket. It forwards bytes
+        # over a private Unix socket, including Docker's interactive streams.
+        # Node is already installed in the base image; no rebuild is needed.
+        # run-relay.sh loads Node, then execs docker-socket-relay.cjs.
+        Invoke-AiWslCommand $Wslc ($docker + @(
+            'create', '--name', $relay, '--network', 'none', '--user', "${launcherUser}:$socketGroup",
+            '--label', "io.yumayo.aicontainer.wsl-relay=$runId",
+            '--mount', "type=bind,source=$engineSource,target=/aicontainer-engine",
+            '--mount', 'type=bind,source=/var/run/docker.sock,target=/aicontainer-upstream/docker.sock,readonly',
+            '--mount', "type=bind,source=$repositorySource/scripts/wsl-docker-relay,target=/aicontainer-relay,readonly",
+            'yumayo-ai-base', 'bash', '/aicontainer-relay/run-relay.sh',
+            'serve', '/aicontainer-engine/docker.sock', '/aicontainer-upstream/docker.sock'
+        ))
+        $relayCreated = $true
+        Invoke-AiWslCommand $Wslc ($docker + @('start', $relay))
+        try {
+            # Probe the Docker API through the relay, not just socket existence.
             Invoke-AiWslCommand $Wslc ($docker + @(
-                'volume', 'create', '--driver', 'local', '--label', $owner,
-                '--opt', 'type=none', '--opt', 'o=bind', '--opt', "device=$($binding.Source)", $binding.Name
+                'exec', $relay, 'bash', '/aicontainer-relay/run-relay.sh',
+                'check', '/aicontainer-engine/docker.sock'
             ))
-            $createdVolumes.Add($binding.Name)
-            $mount = "type=volume,source=$($binding.Name),target=$($binding.Target)"
-            if ($binding.ReadOnly) { $mount += ',readonly' }
-            $mountArguments += @('--mount', $mount)
+        } catch {
+            try { Invoke-AiWslCommand $Wslc ($docker + @('logs', '--tail', '20', $relay)) }
+            catch { Write-Warning "Could not read Docker relay logs: $_" }
+            throw 'The private Docker relay is not ready. See the relay output above.'
         }
 
-        # Only this trusted launcher has the raw engine socket. The AI container
+        # Share Windows folders again using native Windows bind sources, but
+        # keep their destinations identical to the paths observed by Docker.
+        # The carrier keeps the original VM shares alive for Docker's AI mounts.
+        # The unique target is absent in the image, so wslc's default volume
+        # population cannot copy image files into this runtime volume.
+        $mountArguments = @(
+            '--mount', "type=volume,source=$runtimeVolume,target=$runtimeSource",
+            '--mount', "type=volume,source=$engineVolume,target=/aicontainer-engine,readonly",
+            '--volume', "${Workspace}:$workspaceSource"
+        )
+        if ($repositorySource -ne $workspaceSource) {
+            $mountArguments += @('--volume', "${Repository}:${repositorySource}:ro")
+        }
+
+        # Only this trusted launcher receives the relay socket. The AI container
         # is created by .bash_ai_container with its existing restrictions.
         # Use wslc for both creation and attachment so it owns the lifecycle.
         # wslc has no --group-add; keep ubuntu's UID and use the socket's GID.
@@ -396,7 +429,7 @@ function Start-AiWslContainer {
         $arguments = @(
             'create', '--name', $runner, '--interactive', '--tty', '--network', 'none',
             '--user', "${launcherUser}:$socketGroup", '--label', "io.yumayo.aicontainer.wsl-launch=$runId",
-            '--env', 'DOCKER_HOST=unix:///var/run/aicontainer-engine/docker.sock', '--env', 'TERM=xterm-256color',
+            '--env', 'DOCKER_HOST=unix:///aicontainer-engine/docker.sock', '--env', 'TERM=xterm-256color',
             '--env', "AICONTAINER_RUNTIME_ROOT=$runtimeSource"
         ) + $mountArguments
         $arguments += @('yumayo-ai-base', 'bash', "$repositorySource/scripts/wsl-launch.sh",
@@ -412,6 +445,10 @@ function Start-AiWslContainer {
             try { Invoke-AiWslCommand $Wslc @('rm', '--force', $runner) }
             catch { Write-Warning "Could not remove launcher ${runner}: $_" }
         }
+        if ($relayCreated) {
+            try { Invoke-AiWslCommand $Wslc ($docker + @('rm', '--force', $relay)) }
+            catch { Write-Warning "Could not remove Docker relay ${relay}: $_" }
+        }
         try {
             $children = Read-AiWslCommand $Wslc ($docker + @('ps', '-aq', '--filter', "label=$owner"))
             foreach ($id in ($children -split '\s+')) {
@@ -426,15 +463,15 @@ function Start-AiWslContainer {
                 }
             }
         } catch { Write-Warning "Could not clean up AI resources for ${runId}: $_" }
-        # Remove only volumes successfully created by this invocation. Removing
-        # the runtime volume deletes snapshots; bind volumes only release mounts.
-        foreach ($volume in $createdVolumes) {
-            try { Invoke-AiWslCommand $Wslc ($docker + @('volume', 'rm', $volume)) }
-            catch { Write-Warning "Could not remove launcher volume ${volume}: $_" }
-        }
         if ($carrierCreated) {
             try { Invoke-AiWslCommand $Wslc @('rm', '--force', $carrier) }
             catch { Write-Warning "Could not release Windows shares ${carrier}: $_" }
+        }
+        # Both native containers must release their references before WSL can
+        # remove the volumes. --force ignores missing names, not active users.
+        foreach ($volume in $createdVolumes) {
+            try { Invoke-AiWslCommand $Wslc @('volume', 'remove', '--force', $volume) }
+            catch { Write-Warning "Could not remove launcher volume ${volume}: $_" }
         }
     }
 }
