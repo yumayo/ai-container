@@ -406,6 +406,26 @@ try {
         Assert-True ($filter.Arguments[-1] -match '^label=io\.yumayo\.aicontainer\.wsl-run=[0-9a-f]{32}$') 'Never clean up unrelated resources.'
     }
 
+    # A launch profile is mapped through the observed share without exposing its contents.
+    $profileDirectory = Join-Path $temporary 'profile 日本語'
+    $null = New-Item -ItemType Directory -Path $profileDirectory
+    $profileFile = Join-Path $profileDirectory 'launch.json'
+    [IO.File]::WriteAllText($profileFile, '{"arguments":["--continue"],"environment":{"TOKEN":"secret-not-in-arguments"}}')
+    $profileRunnerDirectory = Join-Path $temporary 'docker/aicontainer'
+    $null = New-Item -ItemType Directory -Path $profileRunnerDirectory -Force
+    [IO.File]::WriteAllText((Join-Path $profileRunnerDirectory 'launch-profile.cjs'), '// fixture')
+    Reset-Fixture
+    Start-AiWslContainer -Wslc 'wslc.exe' -Repository $temporary -Workspace $temporary -Tool codex -LaunchProfileFile $profileFile
+    $profileCreate = @($script:calls | Where-Object { ($_.Arguments -join ' ') -match '^create --name yumayo-ai-launch-' })
+    Assert-True ($profileCreate[0].Arguments -contains 'AICONTAINER_LAUNCH_PROFILE=/mnt/workspace-share/profile 日本語/launch.json') 'Translate the profile through the actual workspace share.'
+    Assert-True (($profileCreate[0].Arguments -join ' ') -notmatch 'secret-not-in-arguments') 'Do not expose profile values in launcher arguments.'
+    Reset-Fixture
+    Assert-Throws { Start-AiWslContainer -Wslc 'wslc.exe' -Repository $temporary -Workspace $temporary -Tool bash -LaunchProfileFile $profileFile } 'explicit claude or codex'
+    Assert-True ($script:calls.Count -eq 0) 'Reject a profile for a shell before preparing containers.'
+    Reset-Fixture
+    Assert-Throws { Start-AiWslContainer -Wslc 'wslc.exe' -Repository $temporary -Workspace $profileDirectory -Tool codex -LaunchProfileFile (Join-Path $temporary '.bash_ai_container') } 'inside Workspace'
+    Assert-True ($script:calls.Count -eq 0) 'Reject an outside profile before preparing containers.'
+
     Reset-Fixture
     $script:sameMount = $true
     Start-AiWslContainer -Wslc 'wslc.exe' -Repository $temporary -Workspace $temporary

@@ -22,4 +22,7 @@ docker() {
 
 cd "$workspace"
 source "$repository/.bash_ai_container"
+if [[ -n "${AICONTAINER_LAUNCH_PROFILE:-}" ]]; then
+    export AICONTAINER_LAUNCH_PROFILE_RUNNER="$repository/docker/aicontainer/launch-profile.cjs"
+fi
 aicontainer "$@"

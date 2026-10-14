@@ -12,6 +12,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start-wsl-containers.p
 param(
     [string] $Workspace = (Get-Location).Path,
     [ValidateSet('', 'claude', 'codex', 'bash')][string] $Tool = '',
+    [string] $LaunchProfileFile = '',
     [switch] $Rebuild,
     [switch] $WebDownload
 )
@@ -34,7 +35,7 @@ try {
     } elseif (-not (Test-AiWslImages $result.Wslc)) {
         Build-AiWslImages -Wslc $result.Wslc -Repository $PSScriptRoot
     }
-    Start-AiWslContainer -Wslc $result.Wslc -Repository $PSScriptRoot -Workspace $Workspace -Tool $Tool
+    Start-AiWslContainer -Wslc $result.Wslc -Repository $PSScriptRoot -Workspace $Workspace -Tool $Tool -LaunchProfileFile $LaunchProfileFile
     exit $script:AiWslExitCode
 } catch {
     Write-Error $_ -ErrorAction Continue

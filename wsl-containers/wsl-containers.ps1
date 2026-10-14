@@ -299,7 +299,8 @@ function Start-AiWslContainer {
         [Parameter(Mandatory = $true)][string] $Wslc,
         [Parameter(Mandatory = $true)][string] $Repository,
         [Parameter(Mandatory = $true)][string] $Workspace,
-        [ValidateSet('', 'claude', 'codex', 'bash')][string] $Tool = ''
+        [ValidateSet('', 'claude', 'codex', 'bash')][string] $Tool = '',
+        [string] $LaunchProfileFile = ''
     )
 
     $workspaceItem = Get-Item -LiteralPath $Workspace -ErrorAction Stop
@@ -308,6 +309,26 @@ function Start-AiWslContainer {
     }
     $Workspace = $workspaceItem.FullName
     $Repository = (Get-Item -LiteralPath $Repository -ErrorAction Stop).FullName
+    $profileRelativePath = ''
+    if ($LaunchProfileFile) {
+        if ($Tool -notin @('claude', 'codex')) { throw 'LaunchProfileFile requires an explicit claude or codex Tool.' }
+        $profile = Get-Item -LiteralPath $LaunchProfileFile -ErrorAction Stop
+        $workspacePrefix = $Workspace.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+        if ($profile.PSIsContainer -or -not $profile.FullName.StartsWith($workspacePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'LaunchProfileFile must be an existing file inside Workspace.'
+        }
+        $item = $profile
+        while ($null -ne $item) {
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'LaunchProfileFile cannot use linked paths.' }
+            if ($item.FullName -eq $Workspace) { break }
+            if ($item -is [IO.DirectoryInfo]) { $item = $item.Parent }
+            else { $item = $item.Directory }
+        }
+        $profileRelativePath = $profile.FullName.Substring($workspacePrefix.Length).Replace('\', '/')
+        if (-not (Test-Path -LiteralPath (Join-Path $Repository 'docker/aicontainer/launch-profile.cjs') -PathType Leaf)) {
+            throw 'Launch profile support is missing. Update the ai-container checkout.'
+        }
+    }
     foreach ($file in @('.bash_ai_container', 'wsl-containers/wsl-launch.sh', 'wsl-containers/wsl-docker-relay/run-relay.sh')) {
         if ([IO.File]::ReadAllText((Join-Path $Repository $file)).Contains("`r")) {
             throw "CRLF found in $file. Restore LF line endings before starting."
@@ -432,6 +453,7 @@ function Start-AiWslContainer {
             '--env', 'DOCKER_HOST=unix:///aicontainer-engine/docker.sock', '--env', 'TERM=xterm-256color',
             '--env', "AICONTAINER_RUNTIME_ROOT=$runtimeSource"
         ) + $mountArguments
+        if ($profileRelativePath) { $arguments += @('--env', "AICONTAINER_LAUNCH_PROFILE=$workspaceSource/$profileRelativePath") }
         $arguments += @('yumayo-ai-base', 'bash', "$repositorySource/wsl-containers/wsl-launch.sh",
             $repositorySource, $workspaceSource, $runId)
         if ($Tool) { $arguments += $Tool }

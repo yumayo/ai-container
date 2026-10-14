@@ -389,6 +389,19 @@ __aicontainer_prepare_mount() {
 }
 
 aicontainer() {
+  # 公開起動 API の設定ファイルは内容を展開せず、読み取り専用で AI へ渡す。
+  local launch_profile="${AICONTAINER_LAUNCH_PROFILE:-}"
+  local launch_profile_runner="${AICONTAINER_LAUNCH_PROFILE_RUNNER:-}"
+  if [ -n "$launch_profile" ]; then
+    if [[ "${1:-}" != claude && "${1:-}" != codex ]] || [ ! -f "$launch_profile" ] || [ ! -f "$launch_profile_runner" ]; then
+      __aicontainer_log_error "起動プロファイルには既存ファイルと claude / codex の明示指定が必要です。"
+      return 1
+    fi
+    if [[ "$launch_profile" == *','* || "$launch_profile_runner" == *','* ]]; then
+      __aicontainer_log_error "起動プロファイルのパスにカンマは使用できません。"
+      return 1
+    fi
+  fi
   # .aicontainer の設定を読み込み
   declare -A AICONTAINER_CONFIG
   AICONTAINER_PATHS=()
@@ -642,6 +655,14 @@ aicontainer() {
 
   if [ -n "$cmd_override" ]; then
     cmd="$cmd_override"
+  fi
+
+  if [ -n "$launch_profile" ]; then
+    local profile_mount runner_mount
+    printf -v profile_mount '%q' "type=bind,source=$launch_profile,target=/etc/aicontainer/launch-profile.json,readonly"
+    printf -v runner_mount '%q' "type=bind,source=$launch_profile_runner,target=/etc/aicontainer/launch-profile.cjs,readonly"
+    extra_opts="$extra_opts --mount $profile_mount --mount $runner_mount"
+    cmd="node /etc/aicontainer/launch-profile.cjs /etc/aicontainer/launch-profile.json $cmd"
   fi
 
   # .aicontainer の env 設定を追加

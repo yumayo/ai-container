@@ -42,6 +42,9 @@ WSL が導入済みでも `VirtualMachinePlatform` が無効なら、DISM でそ
 .\start-wsl-containers.ps1 -Workspace C:\src\my-project -Tool codex
 .\start-wsl-containers.ps1 -Workspace C:\src\my-project -Tool bash
 
+# ワークスペース内の起動専用 JSON を追加。既存のユーザー設定は変更しない
+.\start-wsl-containers.ps1 -Workspace C:\src\my-project -Tool codex -LaunchProfileFile C:\src\my-project\.runtime\launch.json
+
 # Dockerfile や AI ツールを更新したいとき
 .\start-wsl-containers.ps1 -Workspace C:\src\my-project -Rebuild
 

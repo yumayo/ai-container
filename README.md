@@ -10,6 +10,23 @@ Windows 向けに、WSL Containers の専用 VM に含まれる Docker Engine �
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start-wsl-containers.ps1 -Workspace C:\src\my-project -Tool codex
 ```
 
+アプリから起動時だけ MCP などの設定を渡す場合は、`-LaunchProfileFile` にワークスペース配下の JSON ファイルを指定できます。この引数に対応した本リポジトリの起動スクリプトが必要です。既存の `.aicontainer` や AI ツールの設定ファイルは変更しません。
+
+```powershell
+.\start-wsl-containers.ps1 -Workspace C:\src\my-project -Tool codex -LaunchProfileFile C:\src\my-project\.runtime\launch.json
+```
+
+```json
+{
+  "arguments": ["-c", "mcp_servers.example={url=\"http://192.168.1.10:3000/\",bearer_token_env_var=\"EXAMPLE_TOKEN\"}"],
+  "environment": { "EXAMPLE_TOKEN": "application-generated-secret" }
+}
+```
+
+プロファイルは既存のファイルに限り、リンク経由・ワークスペース外のパスは拒否します。`-Tool` には `claude` または `codex` を明示してください。プロファイルと起動補助を読み取り専用で渡し、コンテナ内で引数の配列と環境変数へ変換します。ファイル内容をシェルで実行したり、起動ログ・Docker の引数に出力したりしません。共通システムプロンプトと既存の認証・履歴は維持します。現在のイメージが共通 CLI ラッパーに対応していれば、イメージの再ビルドは不要です。
+
+形式は上記 2 プロパティのみで、ファイルは 1 MiB 以下、引数・環境変数は各 1,000 個以下です。値は NUL を含まない文字列、環境変数名は英字または `_` で始まる英数字・`_` に限ります。パスにはカンマを使用できません。秘密を含むファイルは呼び出し元で Git の対象外にし、AI の終了後に削除してください。プロファイルで通信許可は増えません。HTTP MCP の接続先は従来どおり `.aicontainer` の `allow-ip` / `allow-dns` で起動前に許可します。
+
 以下は従来の Docker 版の手順です。
 
 ```sh

@@ -88,6 +88,31 @@ class WslLaunchTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.root / "docker-events.jsonl").exists())
 
+    def test_launch_profile_is_readonly_and_contents_never_enter_docker_arguments(self):
+        profile = self.root / 'profile 日本語 $(touch injected).json'
+        secret = "secret-for-wsl-profile-test"
+        profile.write_text(json.dumps({"arguments": ["--continue", "two words"],
+                                       "environment": {"TOKEN": secret}}))
+        self.env["AICONTAINER_LAUNCH_PROFILE"] = str(profile)
+        self.config.write_text("allow-ip=192.168.1.2\n")
+        result = self.launch("codex")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        args = json.loads(self.calls.read_text())["args"]
+        self.assertIn(f"type=bind,source={profile},target=/etc/aicontainer/launch-profile.json,readonly", args)
+        self.assertIn(f"type=bind,source={REPOSITORY}/docker/aicontainer/launch-profile.cjs,target=/etc/aicontainer/launch-profile.cjs,readonly", args)
+        self.assertEqual(args[-1], "node /etc/aicontainer/launch-profile.cjs /etc/aicontainer/launch-profile.json codex --yolo -c web_search=disabled")
+        self.assertNotIn(secret, result.stdout + result.stderr + " ".join(args))
+        self.assertFalse((self.root / "injected").exists())
+
+    def test_invalid_launch_profile_fails_before_docker_without_changing_configuration(self):
+        self.config.write_text("tool=codex\nallow-ip=192.168.1.2\n")
+        original = self.config.read_bytes()
+        self.env["AICONTAINER_LAUNCH_PROFILE"] = str(self.root / "missing.json")
+        result = self.launch("codex")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.calls.exists())
+        self.assertEqual(self.config.read_bytes(), original)
+
     def test_private_runtime_volume_preserves_snapshots_and_cleanup(self):
         # Model a separate VM volume with a path that needs shell quoting.
         runtime = self.root / 'runtime $(touch injected)'
