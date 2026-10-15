@@ -64,7 +64,7 @@ aicontainer bash         # .aicontainer の tool を維持して bash を起動
 
 認証情報・チャット履歴はモードごとに `.claude.local` / `.codex.local` へ分離保存されます。
 
-Codex CLI は WebSearch を無効化した状態（`web_search=disabled`）で起動します。
+Codex CLI は、検索・ページ取得を行う標準 Web ツールを無効化した状態（`web_search=disabled`）で起動します。共通の起動ラッパーでも設定するため、`aicontainer bash` 内からの直接起動や `codex exec` / `codex resume` にも適用されます。Codex では WebFetch 相当のページ取得もこの Web ツールが提供するため、個別の WebFetch 設定はありません。この変更の反映には、ホスト側で `bash install.sh main` を実行し、AIコンテナを起動し直してください。
 
 ## AIコンテナの共通指示
 
