@@ -171,7 +171,7 @@ for firewall in iptables ip6tables; do
 done
 ipset destroy allowed-domains 2>/dev/null || true
 
-# Codex内蔵MCPや開発サーバーが使うlocalhostには、ポートごとの例外を設けない。
+# ローカルMCPや開発サーバーが使うlocalhostには、ポートごとの例外を設けない。
 # loの一括許可はDocker内蔵DNSやコンテナ自身のIPにも及ぶため、127.0.0.1と::1に限定する。
 iptables -A INPUT -i lo -s 127.0.0.1/32 -j ACCEPT
 iptables -A OUTPUT -o lo -d 127.0.0.1/32 -j ACCEPT

@@ -64,9 +64,9 @@ aicontainer bash         # .aicontainer の tool を維持して bash を起動
 
 認証情報・チャット履歴はモードごとに `.claude.local` / `.codex.local` へ分離保存されます。
 
-Codex CLI は、検索・ページ取得を行う標準 Web ツールを無効化した状態（`web_search=disabled`）で起動します。共通の起動ラッパーでも設定するため、`aicontainer bash` 内からの直接起動や `codex exec` / `codex resume` にも適用されます。Codex では WebFetch 相当のページ取得もこの Web ツールが提供するため、個別の WebFetch 設定はありません。この変更の反映には、ホスト側で `bash install.sh main` を実行し、AIコンテナを起動し直してください。
+Codex CLI は、検索・ページ取得を行う標準 Web ツール（`web_search=disabled`）と、内蔵 MCP の `codex_apps` 全体（`features.apps=false`）、`codex_worktrees` 全体（`features.worktrees=false`）を無効化して起動します。`codex_apps` 経由の Web 検索や外部サービス連携も対象です。共通の起動ラッパーでも設定するため、`aicontainer bash` 内からの直接起動や `codex exec` / `codex resume` にも適用されます。Codex では WebFetch 相当のページ取得も標準 Web ツールが提供するため、個別の WebFetch 設定はありません。この変更の反映には、ホスト側で `bash install.sh main` を実行し、AIコンテナを起動し直してください。
 
-共通指示と検索設定を `-c` で渡すため、Codex は `--no-daemon` を指定し、共有バックグラウンドサーバーを使わない方式（embedded mode）で起動します。これにより、設定の上書きに伴う `Running without the shared background server` の警告を防ぎます。Codex 内蔵の `codex_worktrees` MCP が使う localhost 通信も許可しています。これらの変更も `bash install.sh main` でイメージを再ビルドし、AIコンテナを起動し直すと反映されます。
+共通指示とツールの無効化設定を `-c` で渡すため、Codex は `--no-daemon` を指定し、共有バックグラウンドサーバーを使わない方式（embedded mode）で起動します。これにより、設定の上書きに伴う `Running without the shared background server` の警告を防ぎます。
 
 ## AIコンテナの共通指示
 
@@ -309,7 +309,7 @@ Goプロキシのテストは `cd docker/docker-proxy && go test main.go main_te
 
 AIコンテナは常に外部通信用の専用ネットワークを使い、`append-network` を指定した場合は他コンテナのネットワークにも追加で参加します。すべてのネットワークで接続先をコンテナ内のファイアウォールにより制限します。外部コンテナのコマンド実行はDocker Socket Proxyを経由し、HTTPのMCPサーバーには `allow-dns` で許可して直接接続します。
 
-接続先は、AIコンテナ内部のlocalhost（`127.0.0.1` / `::1`）、モード別のAnthropic／OpenAIのAPI・認証先、`.aicontainer` の `allow-dns` に指定した名前から解決したIPv4アドレス、`allow-ip` に指定したIPv4アドレス・CIDRに限定しています。localhostの送受信は、53番を含む全ポートで許可します。登録済みIP・範囲への送信とその応答は、DNS（UDP/TCP 53番）を除き全ポートで許可します。コンテナ自身の非ループバックIP、許可範囲外のIP、localhost以外のIPv6通信は拒否します。コンテナ内の開発サーバーやCodex内蔵MCPにはlocalhostで接続できます。
+接続先は、AIコンテナ内部のlocalhost（`127.0.0.1` / `::1`）、モード別のAnthropic／OpenAIのAPI・認証先、`.aicontainer` の `allow-dns` に指定した名前から解決したIPv4アドレス、`allow-ip` に指定したIPv4アドレス・CIDRに限定しています。localhostの送受信は、53番を含む全ポートで許可します。登録済みIP・範囲への送信とその応答は、DNS（UDP/TCP 53番）を除き全ポートで許可します。コンテナ自身の非ループバックIP、許可範囲外のIP、localhost以外のIPv6通信は拒否します。コンテナ内の開発サーバーやローカルMCPにはlocalhostで接続できます。
 
 起動時に必要なドメインのIPv4アドレスを解決して `/etc/hosts` に登録し、その後はlocalhost以外へのDNS通信（UDP/TCP 53番ポート）とDocker内蔵DNSへの接続を拒否します。localhost上にDNSサーバーがある場合は問い合わせできます。IPアドレスを更新する場合はコンテナを再作成してください。
 

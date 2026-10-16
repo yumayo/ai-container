@@ -24,7 +24,8 @@ class AiCliTest(unittest.TestCase):
             (self.workspace / name).write_text("Project-specific instructions\n")
         self.session = self.root / "session"
         self.session.mkdir()
-        (self.session / "config.toml").write_text('model = "existing-model"\n')
+        self.config_content = 'model = "existing-model"\n[features]\napps = true\nworktrees = true\n'
+        (self.session / "config.toml").write_text(self.config_content)
         self.prompt = self.root / "system-prompt.md"
         # 引用符・改行・シェル展開文字を含む独立した指示も、正確に渡す。
         self.content = (SOURCE / "system-prompt.md").read_text() + '\n"quotes" \\ path\n$(touch injected) `touch injected` 日本語\n'
@@ -66,6 +67,7 @@ sys.exit(17)
 
     def test_both_tools_receive_container_instructions_before_user_arguments(self):
         for tool, args in (("claude", ["--continue", "--print", "two words", ""]),
+                           ("codex", []),
                            ("codex", ["exec", "--json", "two words", ""]),
                            ("codex", ["resume", "--last"])):
             with self.subTest(tool=tool, args=args):
@@ -73,7 +75,7 @@ sys.exit(17)
                 self.assertEqual(result.returncode, 17, result.stderr)
                 self.assertEqual(result.stderr, "tool stderr\n")
                 record = json.loads(result.stdout)
-                injected_count = 2 if tool == "claude" else 5
+                injected_count = 2 if tool == "claude" else 9
                 self.assertEqual(record["args"][injected_count:], args)
                 self.assertEqual(record["cwd"], str(self.workspace))
                 self.assertEqual(record["stdin"], "stdin payload\n")
@@ -85,9 +87,13 @@ sys.exit(17)
                     self.assertEqual(tomllib.loads(record["args"][1]), {"developer_instructions": self.content})
                     self.assertEqual(record["args"][2], "-c")
                     self.assertEqual(tomllib.loads(record["args"][3]), {"web_search": "disabled"})
-                    self.assertEqual(record["args"][4], "--no-daemon")
+                    self.assertEqual(record["args"][4], "-c")
+                    self.assertEqual(tomllib.loads(record["args"][5]), {"features": {"apps": False}})
+                    self.assertEqual(record["args"][6], "-c")
+                    self.assertEqual(tomllib.loads(record["args"][7]), {"features": {"worktrees": False}})
+                    self.assertEqual(record["args"][8], "--no-daemon")
         self.assertFalse((self.workspace / "injected").exists())
-        self.assertEqual((self.session / "config.toml").read_text(), 'model = "existing-model"\n')
+        self.assertEqual((self.session / "config.toml").read_text(), self.config_content)
         self.assertEqual(sorted(p.name for p in self.session.iterdir()), ["config.toml"])
         for name in ("AGENTS.md", "CLAUDE.md"):
             self.assertEqual((self.workspace / name).read_text(), "Project-specific instructions\n")
@@ -100,12 +106,16 @@ sys.exit(17)
                 result = self.run_cli(tool, "--version", shell=True)
                 self.assertEqual(result.returncode, 17, result.stderr)
                 arguments = json.loads(result.stdout)["args"]
-                injected_count = 2 if tool == "claude" else 5
+                injected_count = 2 if tool == "claude" else 9
                 self.assertEqual(arguments[injected_count:], ["--version"])
                 if tool == "codex":
                     self.assertEqual(arguments[2], "-c")
                     self.assertEqual(tomllib.loads(arguments[3]), {"web_search": "disabled"})
-                    self.assertEqual(arguments[4], "--no-daemon")
+                    self.assertEqual(arguments[4], "-c")
+                    self.assertEqual(tomllib.loads(arguments[5]), {"features": {"apps": False}})
+                    self.assertEqual(arguments[6], "-c")
+                    self.assertEqual(tomllib.loads(arguments[7]), {"features": {"worktrees": False}})
+                    self.assertEqual(arguments[8], "--no-daemon")
 
     def test_missing_prompt_prevents_launch_without_instructions(self):
         self.prompt.unlink()

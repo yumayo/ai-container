@@ -100,7 +100,7 @@ class WslLaunchTest(unittest.TestCase):
         args = json.loads(self.calls.read_text())["args"]
         self.assertIn(f"type=bind,source={profile},target=/etc/aicontainer/launch-profile.json,readonly", args)
         self.assertIn(f"type=bind,source={REPOSITORY}/docker/aicontainer/launch-profile.cjs,target=/etc/aicontainer/launch-profile.cjs,readonly", args)
-        self.assertEqual(args[-1], "node /etc/aicontainer/launch-profile.cjs /etc/aicontainer/launch-profile.json codex --yolo -c web_search=disabled")
+        self.assertEqual(args[-1], "node /etc/aicontainer/launch-profile.cjs /etc/aicontainer/launch-profile.json codex --yolo -c web_search=disabled -c features.apps=false -c features.worktrees=false")
         self.assertNotIn(secret, result.stdout + result.stderr + " ".join(args))
         self.assertFalse((self.root / "injected").exists())
 
