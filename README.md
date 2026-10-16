@@ -66,6 +66,8 @@ aicontainer bash         # .aicontainer の tool を維持して bash を起動
 
 Codex CLI は、検索・ページ取得を行う標準 Web ツールを無効化した状態（`web_search=disabled`）で起動します。共通の起動ラッパーでも設定するため、`aicontainer bash` 内からの直接起動や `codex exec` / `codex resume` にも適用されます。Codex では WebFetch 相当のページ取得もこの Web ツールが提供するため、個別の WebFetch 設定はありません。この変更の反映には、ホスト側で `bash install.sh main` を実行し、AIコンテナを起動し直してください。
 
+共通指示と検索設定を `-c` で渡すため、Codex は `--no-daemon` を指定し、共有バックグラウンドサーバーを使わない方式（embedded mode）で起動します。これにより、設定の上書きに伴う `Running without the shared background server` の警告を防ぎます。Codex 内蔵の `codex_worktrees` MCP が使う localhost 通信も許可しています。これらの変更も `bash install.sh main` でイメージを再ビルドし、AIコンテナを起動し直すと反映されます。
+
 ## AIコンテナの共通指示
 
 コンテナ共通の指示は [`docker/aicontainer/system-prompt.md`](docker/aicontainer/system-prompt.md) で管理し、イメージ内の `/etc/aicontainer/system-prompt.md` に配置します。外部コンテナのコマンドを `dp` で実行するルールをここに記載しています。
@@ -152,9 +154,9 @@ allow-ip=172.20.0.0/16
 
 プレフィックス長は0〜32で、`/32` は単一IP、`/0` はIPv4全体を許可します。CIDRのホスト部は無視されます（例: `192.168.1.10/24` は `192.168.1.0/24`）。前後の空白、引用符、行末の `#` コメントを使用できます。空の値、IPv6、ホスト名、先頭ゼロのある数値、不正なアドレス・プレフィックス長は起動前にエラーになります。
 
-許可範囲への送信とその応答は、DNS（UDP/TCP 53番）を除く全ポートが対象です。localhost・自分自身のIP・IPv6の拒否は引き続き優先します。`allow-ip` は名前解決やネットワークへの参加・経路を追加しません。他コンテナへ接続する場合は、必要に応じて `append-network` も指定してください。
+許可範囲への送信とその応答は、DNS（UDP/TCP 53番）を除く全ポートが対象です。localhost（`127.0.0.1` / `::1`）は追加設定なしで、53番を含む全ポートの送受信を許可します。Docker内蔵DNS、コンテナ自身の非ループバックIP、localhost以外のIPv6通信の拒否は引き続き優先します。`allow-ip` は名前解決やネットワークへの参加・経路を追加しません。他コンテナへ接続する場合は、必要に応じて `append-network` も指定してください。
 
-API・認証先、`allow-dns` の解決先、`allow-ip` の範囲以外のIPは許可しません。設定や接続先のIPを更新した場合はAIコンテナを再作成してください。
+localhost、API・認証先、`allow-dns` の解決先、`allow-ip` の範囲以外のIPは許可しません。設定や接続先のIPを更新した場合はAIコンテナを再作成してください。
 
 既存環境で `allow-ip` を使うには、ホスト側で `bash install.sh main` を実行し、`source .bash_ai_container` で起動用関数を読み込み直してAIコンテナを再作成してください。`~/.bash_ai_container` にコピーしている場合は、そのファイルも更新してください。
 
@@ -307,9 +309,9 @@ Goプロキシのテストは `cd docker/docker-proxy && go test main.go main_te
 
 AIコンテナは常に外部通信用の専用ネットワークを使い、`append-network` を指定した場合は他コンテナのネットワークにも追加で参加します。すべてのネットワークで接続先をコンテナ内のファイアウォールにより制限します。外部コンテナのコマンド実行はDocker Socket Proxyを経由し、HTTPのMCPサーバーには `allow-dns` で許可して直接接続します。
 
-接続先は、モード別のAnthropic／OpenAIのAPI・認証先、`.aicontainer` の `allow-dns` に指定した名前から解決したIPv4アドレス、`allow-ip` に指定したIPv4アドレス・CIDRに限定しています。登録済みIP・範囲への送信とその応答は、DNS（UDP/TCP 53番）を除き全ポートで許可します。localhost、自分自身のIP、許可範囲外のIP、IPv6通信は拒否します。
+接続先は、AIコンテナ内部のlocalhost（`127.0.0.1` / `::1`）、モード別のAnthropic／OpenAIのAPI・認証先、`.aicontainer` の `allow-dns` に指定した名前から解決したIPv4アドレス、`allow-ip` に指定したIPv4アドレス・CIDRに限定しています。localhostの送受信は、53番を含む全ポートで許可します。登録済みIP・範囲への送信とその応答は、DNS（UDP/TCP 53番）を除き全ポートで許可します。コンテナ自身の非ループバックIP、許可範囲外のIP、localhost以外のIPv6通信は拒否します。コンテナ内の開発サーバーやCodex内蔵MCPにはlocalhostで接続できます。
 
-起動時に必要なドメインのIPv4アドレスを解決して `/etc/hosts` に登録し、その後はDNS通信（UDP/TCP 53番ポート）とDocker内蔵DNSへの接続を拒否します。IPアドレスを更新する場合はコンテナを再作成してください。
+起動時に必要なドメインのIPv4アドレスを解決して `/etc/hosts` に登録し、その後はlocalhost以外へのDNS通信（UDP/TCP 53番ポート）とDocker内蔵DNSへの接続を拒否します。localhost上にDNSサーバーがある場合は問い合わせできます。IPアドレスを更新する場合はコンテナを再作成してください。
 
 Dockerサブネット全体を自動で許可するルールはありません。Dockerホストのゲートウェイや他コンテナも、IP許可リストの範囲に含まれていなければ拒否します。`allow-dns` と `allow-ip` の設定は起動時のコピーを読み取り専用で渡すため、実行中にワークスペースの `.aicontainer` を編集しても許可先は増えません。
 

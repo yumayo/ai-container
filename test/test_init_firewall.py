@@ -177,12 +177,12 @@ class FirewallTest(unittest.TestCase):
                                      if e["command"] == "curl" and e["args"][-1] == "https://example.com")
                 self.assertEqual(blocked_probe["resolved"], ANSWERS["example.com"])
 
-    def test_dns_is_rejected_even_on_otherwise_permitted_paths(self):
+    def test_dns_is_rejected_outside_localhost_even_on_otherwise_permitted_paths(self):
         self.dns.write_text("postgres\n")
         self.save_state({"answers": {**ANSWERS, "postgres": ["172.18.0.3"]}})
         state = self.run_script()
-        for address in ("8.8.8.8", "127.0.0.1", "127.0.0.11", "172.18.0.1", "172.18.0.3",
-                        "203.0.113.10", "::1", "2001:4860:4860::8888"):
+        for address in ("8.8.8.8", "127.0.0.2", "127.0.0.11", "172.18.0.1", "172.18.0.2",
+                        "172.18.0.3", "203.0.113.10", "2001:4860:4860::8888"):
             for protocol in ("udp", "tcp"):
                 for established in (False, True):
                     with self.subTest(address=address, protocol=protocol, established=established):
@@ -191,17 +191,37 @@ class FirewallTest(unittest.TestCase):
             for protocol in ("udp", "tcp"):
                 self.assertEqual(verdict(state, "127.0.0.11", port, protocol), "REJECT")
         self.assertEqual(verdict(state, "203.0.113.10", 443), "ACCEPT")
-        self.assertEqual(verdict(state, "127.0.0.1", 8080), "REJECT")
+        self.assertEqual(verdict(state, "127.0.0.1", 8080), "ACCEPT")
+        self.assertEqual(verdict(state, "::1", 8080), "ACCEPT")
         self.assertEqual(verdict(state, "172.18.0.1", 8080), "REJECT")
         self.assertEqual(verdict(state, "198.51.100.10", 443), "REJECT")
 
-    def test_only_api_addresses_and_docker_peers_are_allowed(self):
+    def test_localhost_connections_are_allowed_in_both_modes(self):
+        for mode in ("claude", "codex"):
+            with self.subTest(mode=mode):
+                self.hosts.write_text(self.original_hosts)
+                self.save_state({"answers": ANSWERS})
+                state = self.run_script(mode)
+                for address in ("127.0.0.1", "::1"):
+                    for protocol in ("tcp", "udp"):
+                        for port in (1, 53, 80, 443, 8080, 46657, 65535):
+                            for established in (False, True):
+                                for chain in ("INPUT", "OUTPUT"):
+                                    with self.subTest(address=address, protocol=protocol, port=port,
+                                                      established=established, chain=chain):
+                                        self.assertEqual(verdict(state, address, port, protocol,
+                                                                 established, chain), "ACCEPT")
+                                        # localhost用の許可は外部インターフェイスに適用しない。
+                                        self.assertNotEqual(verdict(state, address, port, protocol,
+                                                                    established, chain, "eth0"), "ACCEPT")
+
+    def test_only_localhost_api_addresses_and_docker_peers_are_allowed(self):
         self.dns.write_text("postgres\n")
         self.save_state({"answers": {**ANSWERS, "postgres": ["172.18.0.3", "172.18.42.10"]}})
         state = self.run_script()
         for established in (False, True):
-            for address in ("127.0.0.1", "127.0.0.11", "172.18.0.1", "172.18.0.2",
-                            "192.168.1.10", "198.51.100.10", "172.19.0.3", "::1",
+            for address in ("127.0.0.2", "127.0.0.11", "172.18.0.1", "172.18.0.2",
+                            "192.168.1.10", "198.51.100.10", "172.19.0.3",
                             "2606:4700:4700::1111"):
                 with self.subTest(address=address, established=established):
                     self.assertEqual(verdict(state, address, 443, established=established), "REJECT")
@@ -264,7 +284,7 @@ class FirewallTest(unittest.TestCase):
                 rerun = self.run_script(mode)
                 self.assertEqual(rerun["allowed"], state["allowed"])
 
-    def test_allow_ip_zero_prefix_preserves_dns_local_and_ipv6_restrictions(self):
+    def test_allow_ip_zero_prefix_preserves_dns_container_ip_and_external_ipv6_restrictions(self):
         self.ips.write_text("0.0.0.0/0\n")
         state = self.run_script()
         for address in ("1.1.1.1", "128.0.0.1", "192.168.1.10", "172.18.0.1"):
@@ -273,7 +293,13 @@ class FirewallTest(unittest.TestCase):
             self.assertEqual(verdict(state, address, 8080, chain="INPUT"), "DROP")
             for protocol in ("tcp", "udp"):
                 self.assertEqual(verdict(state, address, 53, protocol), "REJECT")
-        for address in ("127.0.0.1", "127.0.0.11", "172.18.0.2", "::1", "2001:db8::1"):
+        for address in ("127.0.0.1", "::1"):
+            self.assertEqual(verdict(state, address, 8080), "ACCEPT")
+            self.assertEqual(verdict(state, address, 8080, chain="INPUT"), "ACCEPT")
+            for protocol in ("tcp", "udp"):
+                self.assertEqual(verdict(state, address, 53, protocol), "ACCEPT")
+                self.assertEqual(verdict(state, address, 53, protocol, chain="INPUT"), "ACCEPT")
+        for address in ("127.0.0.2", "127.0.0.11", "172.18.0.2", "2001:db8::1"):
             for established in (False, True):
                 self.assertEqual(verdict(state, address, 8080, established=established), "REJECT")
                 self.assertEqual(verdict(state, address, 8080, chain="INPUT",

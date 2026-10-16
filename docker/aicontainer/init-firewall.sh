@@ -156,8 +156,8 @@ printf '%s\n' "$HOSTS_END" >> "$HOSTS_TEMP"
 cat "$HOSTS_TEMP" > /etc/hosts
 log_success "Required names saved to /etc/hosts"
 
-# ルールを初期化する前に、既定の動作を拒否に設定する。
-# 許可するアドレスはIPv4のみとし、IPv6経由での迂回を防ぐ。
+# ルール再構築中に未許可の通信が通る時間を作らないよう、先に既定値をDROPにする。
+# 外部向け許可リストはIPv4だけなので、IPv6経由で制限を迂回されないよう同様に閉じる。
 for firewall in iptables ip6tables; do
     "$firewall" -P INPUT DROP
     "$firewall" -P FORWARD DROP
@@ -171,15 +171,28 @@ for firewall in iptables ip6tables; do
 done
 ipset destroy allowed-domains 2>/dev/null || true
 
-# Docker内蔵DNSや自分自身のIPへの接続を含め、ループバック通信を拒否する。
-# Docker内蔵DNSのNATルールも復元しない。
+# Codex内蔵MCPや開発サーバーが使うlocalhostには、ポートごとの例外を設けない。
+# loの一括許可はDocker内蔵DNSやコンテナ自身のIPにも及ぶため、127.0.0.1と::1に限定する。
+iptables -A INPUT -i lo -s 127.0.0.1/32 -j ACCEPT
+iptables -A OUTPUT -o lo -d 127.0.0.1/32 -j ACCEPT
+ip6tables -A INPUT -i lo -s ::1/128 -j ACCEPT
+ip6tables -A OUTPUT -o lo -d ::1/128 -j ACCEPT
+
+# 許可済みIPのDNSでも、再帰問い合わせ・転送により別サーバーへ問い合わせが中継され得る。
+# 中継先への通信は許可先サーバー自身が行うため、このコンテナのファイアウォールでは制限できない。
+# /etc/hostsはdig等の明示的なDNS問い合わせを止めないため、localhost以外の53番は遮断する。
+# 既定のDROPだけでは後続のIP許可ルールで53番も通るので、その前に拒否する。
+# REJECTでエラーを返し、問い合わせ元がタイムアウトまで待つのを避ける。
+for firewall in iptables ip6tables; do
+    for protocol in udp tcp; do
+        "$firewall" -A OUTPUT -p "$protocol" --dport 53 -j REJECT
+    done
+done
+
+# 広いallow-ip指定でもDocker内蔵DNS（127.0.0.11）やコンテナ自身のIPまで許可されないよう、
+# IP許可ルールより前にlocalhost以外のlo通信を閉じる。
 iptables -A INPUT -i lo -j DROP
 iptables -A OUTPUT -o lo -j REJECT --reject-with icmp-admin-prohibited
-
-# 許可済みの接続先も含め、DNSサーバーへの接続を拒否する。
-for protocol in udp tcp; do
-    iptables -A OUTPUT -p "$protocol" --dport 53 -j REJECT
-done
 
 # CIDR形式に対応したIPアドレスの許可リストを作成する。
 ipset create allowed-domains hash:net
@@ -203,13 +216,11 @@ for range in "${ALLOWED_IPS[@]}"; do
     fi
 done
 
-# API・認証先、allow-dnsから解決したIP、allow-ipの範囲への通信を全ポートで許可する。
-# ただし、上で設定したDNSの拒否を優先する。
 # 応答の送信元IPも制限し、既存の接続が許可リストを迂回するのを防ぐ。
 iptables -A INPUT -m set --match-set allowed-domains src -m state --state ESTABLISHED -j ACCEPT
 iptables -A OUTPUT -m set --match-set allowed-domains dst -j ACCEPT
 
-# その他の送信は明示的に拒否し、接続元へすぐにエラーを返す。
+# 未許可の接続でタイムアウトまで待たされないよう、既定のDROPに任せずエラーを返す。
 iptables -A OUTPUT -j REJECT --reject-with icmp-admin-prohibited
 ip6tables -A OUTPUT -j REJECT --reject-with icmp6-adm-prohibited
 

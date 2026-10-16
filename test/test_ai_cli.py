@@ -73,7 +73,7 @@ sys.exit(17)
                 self.assertEqual(result.returncode, 17, result.stderr)
                 self.assertEqual(result.stderr, "tool stderr\n")
                 record = json.loads(result.stdout)
-                injected_count = 2 if tool == "claude" else 4
+                injected_count = 2 if tool == "claude" else 5
                 self.assertEqual(record["args"][injected_count:], args)
                 self.assertEqual(record["cwd"], str(self.workspace))
                 self.assertEqual(record["stdin"], "stdin payload\n")
@@ -85,6 +85,7 @@ sys.exit(17)
                     self.assertEqual(tomllib.loads(record["args"][1]), {"developer_instructions": self.content})
                     self.assertEqual(record["args"][2], "-c")
                     self.assertEqual(tomllib.loads(record["args"][3]), {"web_search": "disabled"})
+                    self.assertEqual(record["args"][4], "--no-daemon")
         self.assertFalse((self.workspace / "injected").exists())
         self.assertEqual((self.session / "config.toml").read_text(), 'model = "existing-model"\n')
         self.assertEqual(sorted(p.name for p in self.session.iterdir()), ["config.toml"])
@@ -99,11 +100,12 @@ sys.exit(17)
                 result = self.run_cli(tool, "--version", shell=True)
                 self.assertEqual(result.returncode, 17, result.stderr)
                 arguments = json.loads(result.stdout)["args"]
-                injected_count = 2 if tool == "claude" else 4
+                injected_count = 2 if tool == "claude" else 5
                 self.assertEqual(arguments[injected_count:], ["--version"])
                 if tool == "codex":
                     self.assertEqual(arguments[2], "-c")
                     self.assertEqual(tomllib.loads(arguments[3]), {"web_search": "disabled"})
+                    self.assertEqual(arguments[4], "--no-daemon")
 
     def test_missing_prompt_prevents_launch_without_instructions(self):
         self.prompt.unlink()
