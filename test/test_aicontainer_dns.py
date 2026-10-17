@@ -1,5 +1,6 @@
 """.aicontainerのDNS・IP許可・ネットワーク分離・プロキシ設定を、Dockerを起動せずに検証する。"""
 
+import csv
 import json
 import os
 from datetime import datetime, timedelta, timezone
@@ -86,8 +87,21 @@ if args[:2] == ["ps", "-aq"]:
     details = network_details[args[3].removeprefix("network=")]
     print("\\n".join(details["references"]))
     sys.exit(0)
+if args[:2] == ["image", "inspect"]:
+    assert args[2:] == ["--format", "{{.Id}}", "yumayo-ai-proxy"]
+    if os.environ.get("TEST_PROXY_TAG_IMAGE_FAIL"):
+        print("proxy image inspect failed", file=sys.stderr)
+        sys.exit(1)
+    print(os.environ.get("TEST_PROXY_TAG_IMAGE", "sha256:current-proxy"))
+    sys.exit(0)
 if args[0] == "inspect":
-    print(os.environ.get("TEST_PROXY_NETWORK", "bridge"))
+    if args[args.index("--format") + 1] == "{{.Image}}":
+        if os.environ.get("TEST_PROXY_CONTAINER_IMAGE_FAIL"):
+            print("running proxy inspect failed", file=sys.stderr)
+            sys.exit(1)
+        print(os.environ.get("TEST_PROXY_CONTAINER_IMAGE", "sha256:current-proxy"))
+    else:
+        print(os.environ.get("TEST_PROXY_NETWORK", "bridge"))
     sys.exit(0)
 if args[0] == "ps" and os.environ.get("TEST_PROXY_NETWORK"):
     print("proxy-id")
@@ -754,13 +768,59 @@ print(directory)
         self.config.write_text("docker-proxy-name=project\ndocker-proxy-allow=pytest\n"
                                "docker-proxy-containers=tools\n")
         self.env.update(TEST_PROXY_NETWORK="none", TEST_PROXY_ALLOW="pytest",
-                        TEST_PROXY_CONTAINERS="tools")
+                        TEST_PROXY_CONTAINERS="tools", TEST_PROXY_TAG_IMAGE="sha256:same-proxy",
+                        TEST_PROXY_CONTAINER_IMAGE="sha256:same-proxy")
         result = self.run_launcher()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse((self.root / "proxy-calls.json").exists())
         self.assertNotIn(["stop", "yumayo-ai-proxy-project"], self.docker_events())
+        self.assertIn(["inspect", "--format", "{{.Image}}", "yumayo-ai-proxy-project"], self.docker_events())
+        self.assertIn(["image", "inspect", "--format", "{{.Id}}", "yumayo-ai-proxy"], self.docker_events())
         self.assertIn("DOCKER_HOST=unix:///var/run/docker-proxy/docker.sock",
                       json.loads(self.calls.read_text())["args"])
+
+    def test_rebuilt_proxy_image_replaces_running_container_and_reuses_socket_volume(self):
+        self.config.write_text("docker-proxy-name=project\ndocker-proxy-allow=pytest\n"
+                               "docker-proxy-containers=tools\n")
+        self.env.update(TEST_PROXY_NETWORK="none", TEST_PROXY_ALLOW="pytest",
+                        TEST_PROXY_CONTAINERS="tools", TEST_PROXY_TAG_IMAGE="sha256:new-proxy",
+                        TEST_PROXY_CONTAINER_IMAGE="sha256:old-proxy")
+        result = self.run_launcher()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        events = self.docker_events()
+        self.assertIn(["stop", "yumayo-ai-proxy-project"], events)
+        self.assertIn(["rm", "yumayo-ai-proxy-project"], events)
+        self.assertLess(events.index(["image", "inspect", "--format", "{{.Id}}", "yumayo-ai-proxy"]),
+                        events.index(["stop", "yumayo-ai-proxy-project"]))
+        self.assertFalse(any(event[:2] == ["volume", "rm"] for event in events))
+        proxy_args = json.loads((self.root / "proxy-calls.json").read_text())["args"]
+        self.assertEqual(proxy_args[proxy_args.index("--network") + 1], "none")
+        self.assertIn("yumayo-ai-proxy-project-sock:/var/run/docker-proxy", proxy_args)
+        self.assertIn("DOCKER_PROXY_ALLOW=pytest", proxy_args)
+        self.assertIn("DOCKER_PROXY_CONTAINERS=tools", proxy_args)
+        self.assertEqual(proxy_args[-1], "yumayo-ai-proxy")
+
+    def test_proxy_image_lookup_failure_preserves_running_container_and_fails(self):
+        self.config.write_text("docker-proxy-name=project\ndocker-proxy-allow=pytest\n"
+                               "docker-proxy-containers=tools\n")
+        self.env.update(TEST_PROXY_NETWORK="none", TEST_PROXY_ALLOW="pytest", TEST_PROXY_CONTAINERS="tools")
+        keys = ("TEST_PROXY_TAG_IMAGE_FAIL", "TEST_PROXY_CONTAINER_IMAGE_FAIL",
+                "TEST_PROXY_TAG_IMAGE", "TEST_PROXY_CONTAINER_IMAGE")
+        for key, value in ((keys[0], "1"), (keys[1], "1"), (keys[2], ""), (keys[3], "")):
+            with self.subTest(failure=key):
+                for reset in keys:
+                    self.env.pop(reset, None)
+                self.env[key] = value
+                events_path = self.root / "docker-events.jsonl"
+                if events_path.exists():
+                    events_path.unlink()
+                result = self.run_launcher()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("イメージ", result.stdout + result.stderr)
+                events = self.docker_events()
+                self.assertFalse(any(event[0] in ("stop", "rm", "run", "volume") for event in events))
+                self.assertFalse(self.calls.exists())
+                self.assertFalse((self.root / "proxy-calls.json").exists())
 
     def test_undefined_proxy_lists_are_passed_as_empty_values(self):
         self.config.write_text("docker-proxy-name=project\n")
@@ -797,6 +857,207 @@ print(directory)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse((self.root / "injected").exists())
                 self.assertFalse(self.calls.exists())
+
+
+    def run_workspace_launcher(self, workspace, tool, dump):
+        command = ("dump", tool) if dump else (tool,)
+        result = subprocess.run(["bash", "-c", 'source "$1"; aicontainer "${@:2}"',
+                                 "test", str(LAUNCHER), *command], cwd=workspace, env=self.env,
+                                text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        if dump:
+            script = result.stdout[result.stdout.index("(\n"):]
+            execution = subprocess.run(["bash"], input=script, cwd=workspace, env=self.env,
+                                       text=True, capture_output=True, timeout=10)
+            self.assertEqual(execution.returncode, 0, execution.stdout + execution.stderr)
+        self.assertFalse((workspace / "injected").exists(), "パスをシェルコマンドとして実行した")
+        args = json.loads(self.calls.read_text())["args"]
+        # --mount 自体の CSV と Bash の引用を別々に検証する。
+        for index, arg in enumerate(args):
+            if arg == "--mount":
+                fields = next(csv.reader([args[index + 1]], strict=True))
+                args[index + 1] = ",".join(fields)
+        return args
+
+    def test_workspace_paths_reach_docker_without_splitting_or_shell_evaluation(self):
+        for suffix in ("Project  Name", "日本語", "comma,path", "'single'", '"double"',
+                       "$(touch injected)", "`touch injected`"):
+            workspace = self.root / suffix
+            workspace.mkdir()
+            for tool in ("claude", "codex"):
+                for dump in (False, True):
+                    with self.subTest(path=suffix, tool=tool, dump=dump):
+                        args = self.run_workspace_launcher(workspace, tool, dump)
+                        self.assertEqual(args[args.index("-w") + 1], str(workspace))
+                        self.assertIn(f"type=bind,source={workspace},target={workspace}", args)
+                        ai_dir = ".codex.local" if tool == "codex" else ".claude.local"
+                        self.assertIn(f"type=tmpfs,target={workspace}/{ai_dir},tmpfs-size=0", args)
+                        session_source = workspace / ai_dir
+                        if tool == "claude":
+                            session_source /= ".claude"
+                        self.assertIn(f"type=bind,source={session_source},target=/home/ubuntu/.{tool}", args)
+
+    def test_comma_profile_and_runner_paths_are_readonly_without_exposing_contents(self):
+        workspace = self.root / 'profile, workspace 日本語 "quote"'
+        workspace.mkdir()
+        profile = workspace / "launch, profile.json"
+        runner = workspace / 'runner, 日本語 "quote".cjs'
+        secret = "secret-that-must-not-enter-docker-arguments"
+        profile.write_text(json.dumps({"arguments": ["--continue"], "environment": {"TOKEN": secret}}))
+        runner.write_text("// Docker を起動せず、マウント引数の境界を検証する。\n")
+        self.env.update(AICONTAINER_LAUNCH_PROFILE=str(profile), AICONTAINER_LAUNCH_PROFILE_RUNNER=str(runner))
+        config = workspace / ".aicontainer"
+        config.write_text("codex_mode=restricted\n")
+        original_config = config.read_bytes()
+        original_profile = profile.read_bytes()
+        for tool in ("claude", "codex"):
+            with self.subTest(tool=tool):
+                result = subprocess.run(["bash", "-c", 'source "$1"; aicontainer "$2"',
+                                         "test", str(LAUNCHER), tool], cwd=workspace, env=self.env,
+                                        text=True, capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                args = json.loads(self.calls.read_text())["args"]
+                mounts = [next(csv.reader([args[index + 1]], strict=True))
+                          for index, arg in enumerate(args) if arg == "--mount"]
+                self.assertIn(["type=bind", f"source={profile}",
+                               "target=/etc/aicontainer/launch-profile.json", "readonly"], mounts)
+                self.assertIn(["type=bind", f"source={runner}",
+                               "target=/etc/aicontainer/launch-profile.cjs", "readonly"], mounts)
+                self.assertNotIn(secret, result.stdout + result.stderr + json.dumps(args))
+                self.assertEqual(config.read_bytes(), original_config)
+                self.assertEqual(profile.read_bytes(), original_profile)
+                self.assertIn("AICONTAINER_CODEX_MODE=restricted", args)
+
+    def test_relative_and_absolute_session_paths_preserve_realpath_and_visibility(self):
+        workspace = self.root / 'workspace 日本語 "quote" $(touch injected)'
+        workspace.mkdir()
+        external = self.root / "outside sessions 'quote' `touch injected`"
+        for setting, resolved, hidden in (("sessions  日本語", workspace / "sessions  日本語", True),
+                                          (str(external), external, False)):
+            for tool in ("claude", "codex"):
+                (workspace / ".aicontainer").write_text(f"session={setting}\n")
+                for dump in (False, True):
+                    with self.subTest(setting=setting, tool=tool, dump=dump):
+                        args = self.run_workspace_launcher(workspace, tool, dump)
+                        ai_dir = ".codex.local" if tool == "codex" else ".claude.local"
+                        source = resolved.resolve() / ai_dir
+                        bind_source = source if tool == "codex" else source / ".claude"
+                        self.assertIn(f"type=bind,source={bind_source},target=/home/ubuntu/.{tool}", args)
+                        self.assertEqual(f"type=tmpfs,target={source},tmpfs-size=0" in args, hidden)
+                        self.assertFalse((external / "injected").exists())
+
+    def test_configured_path_is_quoted_for_the_container_shell(self):
+        workspace = self.root / 'workspace 日本語 \'quote\' "double" $(touch injected)'
+        workspace.mkdir()
+        relative = "tools  日本語 'quote' `touch injected`"
+        (workspace / ".aicontainer").write_text(f"path={relative}\n")
+        # Docker は起動せず、渡された bash コマンドだけ隔離した HOME で評価する。
+        container_home = self.root / "container home"
+        container_home.mkdir()
+        shell_env = dict(self.env, HOME=str(container_home))
+        for dump in (False, True):
+            with self.subTest(dump=dump):
+                args = self.run_workspace_launcher(workspace, "bash", dump)
+                command = args[-1]
+                self.assertTrue(command.endswith("bash"), command)
+                command = command[:-len("bash")] + 'printf "%s" "$PATH"'
+                execution = subprocess.run(["bash", "-c", command], cwd=workspace, env=shell_env,
+                                           text=True, capture_output=True, timeout=10)
+                self.assertEqual(execution.returncode, 0, execution.stdout + execution.stderr)
+                self.assertEqual(execution.stdout, f"{workspace}/{relative}:" + shell_env["PATH"])
+                # 起動後のシェルにも、同じ PATH を再現できることを確認する。
+                startup = subprocess.run(["bash", "-c", 'source "$HOME/.bashrc"; printf "%s" "$PATH"'],
+                                         cwd=workspace, env=shell_env, text=True,
+                                         capture_output=True, timeout=10)
+                self.assertEqual(startup.returncode, 0, startup.stdout + startup.stderr)
+                expected_prefix = f"{workspace}/{relative}:"
+                self.assertTrue(startup.stdout.startswith(expected_prefix), startup.stdout)
+                self.assertFalse((workspace / "injected").exists())
+
+    def test_session_in_sibling_with_workspace_prefix_is_not_hidden(self):
+        workspace = self.root / "project"
+        workspace.mkdir()
+        session = self.root / "project sessions"
+        (workspace / ".aicontainer").write_text(f"session={session}\n")
+        for dump in (False, True):
+            with self.subTest(dump=dump):
+                args = self.run_workspace_launcher(workspace, "codex", dump)
+                self.assertIn(f"type=bind,source={session}/.codex.local,target=/home/ubuntu/.codex", args)
+                self.assertFalse(any(arg.startswith("type=tmpfs,target=") for arg in args))
+
+    def test_symlink_session_uses_canonical_source_without_alias_mounts(self):
+        workspace = self.root / "workspace"
+        workspace.mkdir()
+        external = self.root / "external sessions"
+        external.mkdir()
+        (workspace / "linked sessions").symlink_to(external, target_is_directory=True)
+        (workspace / ".aicontainer").write_text("session=linked sessions\n")
+        for dump in (False, True):
+            with self.subTest(dump=dump):
+                args = self.run_workspace_launcher(workspace, "codex", dump)
+                self.assertIn(f"type=bind,source={external}/.codex.local,target=/home/ubuntu/.codex", args)
+                self.assertFalse(any("type=tmpfs" in arg for arg in args))
+                self.assertIn(f"type=bind,source={workspace},target={workspace}", args)
+
+    def test_aimount_literal_relative_and_absolute_paths_are_not_shell_commands(self):
+        workspace = self.root / "workspace 日本語"
+        workspace.mkdir()
+        for absolute in (False, True):
+            for suffix in ("data  日本語", "'single'", '"double"',
+                           "$(touch injected)", "`touch injected`"):
+                source = workspace / suffix
+                source.mkdir(exist_ok=True)
+                target = f"/workspace/{suffix}"
+                source_text = str(source) if absolute else suffix
+                (workspace / ".aimount").write_text(f"{source_text}:{target}\n")
+                for dump in (False, True):
+                    with self.subTest(absolute=absolute, suffix=suffix, dump=dump):
+                        args = self.run_workspace_launcher(workspace, "codex", dump)
+                        self.assertIn(f"type=bind,source={source.resolve()},target={target}", args)
+
+    def test_aimount_environment_expansion_preserves_path_bytes_and_required_errors(self):
+        workspace = self.root / "workspace"
+        workspace.mkdir()
+        source = self.root / 'data  日本語 "quotes" $(touch injected)'
+        source.mkdir()
+        target = "/workspace/data  日本語 'quotes' `touch injected`"
+        self.env.update(MOUNT_SOURCE=str(source), MOUNT_TARGET=target)
+        for entry in ("$MOUNT_SOURCE:$MOUNT_TARGET", "${MOUNT_SOURCE?}:${MOUNT_TARGET:?missing}",
+                      "${MISSING_SOURCE:-$MOUNT_SOURCE}:${MISSING_TARGET:-$MOUNT_TARGET}"):
+            (workspace / ".aimount").write_text(entry + "\n")
+            for dump in (False, True):
+                with self.subTest(entry=entry, dump=dump):
+                    args = self.run_workspace_launcher(workspace, "codex", dump)
+                    self.assertIn(f"type=bind,source={source},target={target}", args)
+        (workspace / ".aimount").write_text("${MISSING_REQUIRED_PATH:?required path}:/workspace/data\n")
+        events_before = self.docker_events()
+        result = subprocess.run(["bash", "-c", 'source "$1"; aicontainer codex',
+                                 "test", str(LAUNCHER)], cwd=workspace, env=self.env,
+                                text=True, capture_output=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("required path", result.stdout + result.stderr)
+        self.assertEqual(self.docker_events(), events_before)
+
+    def test_aiignore_preserves_workspace_and_additional_mount_target_paths(self):
+        workspace = self.root / 'workspace 日本語 "quotes" $(touch injected)'
+        workspace.mkdir()
+        additional = self.root / "additional data"
+        additional.mkdir()
+        self.env["MOUNT_SOURCE"] = str(additional)
+        target = "/workspace/mounted  日本語 'quote' `touch injected`"
+        self.env["MOUNT_TARGET"] = target
+        (workspace / ".aimount").write_text("$MOUNT_SOURCE:$MOUNT_TARGET\n")
+        entries = ("hidden  directory $(touch injected)", "secret 'file' `touch injected`")
+        for root in (workspace, additional):
+            (root / entries[0]).mkdir()
+            (root / entries[1]).write_text("secret")
+            (root / ".aiignore").write_text("\n".join(entries) + "\n")
+        for dump in (False, True):
+            with self.subTest(dump=dump):
+                args = self.run_workspace_launcher(workspace, "codex", dump)
+                for mount_target in (str(workspace), target):
+                    self.assertIn(f"type=tmpfs,target={mount_target}/{entries[0]},tmpfs-size=0", args)
+                    self.assertIn(f"type=bind,source=/dev/null,target={mount_target}/{entries[1]},readonly", args)
 
 
 if __name__ == "__main__":

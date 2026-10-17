@@ -47,6 +47,18 @@ __aicontainer_log_error() {
   echo -e "${__AICONTAINER_RED}[$(__aicontainer_now)] ✗ $1${__AICONTAINER_NC}" >&2
 }
 
+# Docker の CSV フィールドを組み立てた後、eval / dump 用の Bash 引数として引用する。
+__aicontainer_quote_mount() {
+  local field specification=""
+  for field in "$@"; do
+    if [[ "$field" == *','* || "$field" == *'"'* || "$field" == *$'\n'* || "$field" == *$'\r'* ]]; then
+      field="\"${field//\"/\"\"}\""
+    fi
+    specification+="${specification:+,}$field"
+  done
+  printf '%q' "$specification"
+}
+
 # 1つのエントリーをAI_IGNOREに追加
 __aicontainer_add_ignore_entry() {
   local host_path="$1"
@@ -61,12 +73,12 @@ __aicontainer_add_ignore_entry() {
 
   if [ -d "$host_path" ]; then
     AI_IGNORE="$AI_IGNORE \\
-    --mount type=tmpfs,target=$container_path,tmpfs-size=0"
+    --mount $(__aicontainer_quote_mount type=tmpfs "target=$container_path" tmpfs-size=0)"
     AI_IGNORE_PATHS[$container_path]=1
     __aicontainer_log_info "ignored: $message"
   elif [ -f "$host_path" ]; then
     AI_IGNORE="$AI_IGNORE \\
-    --mount type=bind,source=/dev/null,target=$container_path,readonly"
+    --mount $(__aicontainer_quote_mount type=bind source=/dev/null "target=$container_path" readonly)"
     AI_IGNORE_PATHS[$container_path]=1
     __aicontainer_log_info "ignored: $message"
   fi
@@ -302,17 +314,24 @@ __aicontainer_start_proxy() {
   local proxy_volume="yumayo-ai-proxy-${2}-sock"
   local proxy_containers="${3:-}"
 
-  # 既に起動中の場合、設定が変わっていれば再起動
+  # 設定と immutable image ID が一致する既存プロキシだけを再利用する。
   if docker ps -q -f name="^${proxy_name}$" | grep -q .; then
-    local current_allow current_containers current_network
+    local current_allow current_containers current_network current_image target_image
+    if ! current_image="$(docker inspect --format '{{.Image}}' "$proxy_name")" ||
+       ! target_image="$(docker image inspect --format '{{.Id}}' yumayo-ai-proxy)" ||
+       [ -z "$current_image" ] || [ -z "$target_image" ]; then
+      __aicontainer_log_error "docker-proxy($2): イメージを確認できません。既存コンテナを保持して起動を中止します。"
+      return 1
+    fi
     current_allow="$(docker exec "$proxy_name" cat /etc/docker-proxy/allow.txt 2>/dev/null || true)"
     current_containers="$(docker exec "$proxy_name" cat /etc/docker-proxy/containers.txt 2>/dev/null || true)"
     current_network="$(docker inspect --format '{{.HostConfig.NetworkMode}}' "$proxy_name" 2>/dev/null || true)"
-    if [ "$current_allow" = "$proxy_allow" ] && [ "$current_containers" = "$proxy_containers" ] && [ "$current_network" = none ]; then
+    if [ "$current_allow" = "$proxy_allow" ] && [ "$current_containers" = "$proxy_containers" ] &&
+       [ "$current_network" = none ] && [ "$current_image" = "$target_image" ]; then
       __aicontainer_log_info "docker-proxy($2): already running"
       return 0
     fi
-    __aicontainer_log_warning "docker-proxy($2): config changed, restarting..."
+    __aicontainer_log_warning "docker-proxy($2): config or image changed, restarting..."
     docker stop "$proxy_name" &>/dev/null || true
     docker rm "$proxy_name" &>/dev/null || true
   fi
@@ -395,7 +414,7 @@ __aicontainer_prepare_mount() {
   __aicontainer_log_step "mount start: $src -> $dst"
 
   AI_MOUNT="$AI_MOUNT \\
-    --mount type=bind,source=$src,target=$dst"
+    --mount $(__aicontainer_quote_mount type=bind "source=$src" "target=$dst")"
 
   if [ -d "$src" ]; then
     __aicontainer_process_aiignore_in_dir "$src" "$dst"
@@ -411,10 +430,6 @@ aicontainer() {
   if [ -n "$launch_profile" ]; then
     if [[ "${1:-}" != claude && "${1:-}" != codex ]] || [ ! -f "$launch_profile" ] || [ ! -f "$launch_profile_runner" ]; then
       __aicontainer_log_error "起動プロファイルには既存ファイルと claude / codex の明示指定が必要です。"
-      return 1
-    fi
-    if [[ "$launch_profile" == *','* || "$launch_profile_runner" == *','* ]]; then
-      __aicontainer_log_error "起動プロファイルのパスにカンマは使用できません。"
       return 1
     fi
   fi
@@ -608,9 +623,14 @@ aicontainer() {
         continue
       fi
 
-      # 先に環境変数を展開してから:で分割
+      # パスの空白・引用符は維持し、文書化された環境変数展開だけを許可する。
+      # コマンド置換を無効化した二重引用内で展開し、値を再びシェルとして解釈しない。
       local expanded_line
-      if ! expanded_line="$(eval echo "$line" 2>&1)"; then
+      expanded_line="${line//\\/\\\\}"
+      expanded_line="${expanded_line//\"/\\\"}"
+      expanded_line="${expanded_line//\`/\\\`}"
+      expanded_line="${expanded_line//\$\(/\\\$\(}"
+      if ! expanded_line="$(eval "printf '%s\\n' \"$expanded_line\"" 2>&1)"; then
         echo "Error: environment variable error: $line" >&2
         echo "  $expanded_line" >&2
         return 1
@@ -676,8 +696,8 @@ aicontainer() {
 
   if [ -n "$launch_profile" ]; then
     local profile_mount runner_mount
-    printf -v profile_mount '%q' "type=bind,source=$launch_profile,target=/etc/aicontainer/launch-profile.json,readonly"
-    printf -v runner_mount '%q' "type=bind,source=$launch_profile_runner,target=/etc/aicontainer/launch-profile.cjs,readonly"
+    profile_mount="$(__aicontainer_quote_mount type=bind "source=$launch_profile" target=/etc/aicontainer/launch-profile.json readonly)"
+    runner_mount="$(__aicontainer_quote_mount type=bind "source=$launch_profile_runner" target=/etc/aicontainer/launch-profile.cjs readonly)"
     extra_opts="$extra_opts --mount $profile_mount --mount $runner_mount"
     cmd="node /etc/aicontainer/launch-profile.cjs /etc/aicontainer/launch-profile.json $cmd"
   fi
@@ -715,39 +735,27 @@ aicontainer() {
   fi
 
   if [ -n "$extra_paths" ]; then
-    # .bashrcに書き込み（後続のシェルでもPATHが有効）+ 現在のシェルにもexport
-    init_cmd="echo 'export PATH=${extra_paths}\\\$PATH' >> ~/.bashrc && export PATH=${extra_paths}\\\$PATH && "
+    # inner bash と起動時の eval では引用の段階が異なる。PATH の値だけ先に引用する。
+    local quoted_extra_paths path_export quoted_path_export
+    printf -v quoted_extra_paths '%q' "$extra_paths"
+    path_export="export PATH=$quoted_extra_paths\"\$PATH\""
+    printf -v quoted_path_export '%q' "$path_export"
+    init_cmd="printf '%s\\n' $quoted_path_export >> ~/.bashrc && $path_export && "
   fi
 
+  local session_dir="$workdir/$ai_dir"
   if [ -n "$config_session" ]; then
-    # セッションモード: ホストの指定パスをバインドマウント
-    if [ "$AI_TOOL" = "codex" ]; then
-      session_mounts="--mount type=bind,source=\"$session_path/$ai_dir\",target=/home/ubuntu/.codex"
-    else
-      session_mounts="--mount type=bind,source=\"$session_path/$ai_dir/.claude\",target=/home/ubuntu/.claude \\
-    --mount type=bind,source=\"$session_path/$ai_dir/.claude.json\",target=/home/ubuntu/.claude.json"
-    fi
-    # セッションパスがワークスペース配下の場合、tmpfsでAIから隠す
-    # ~/.claudeはAIから常にアクセス可能だが、ワークスペース内にセッションディレクトリが
-    # 存在するとlsやfind等でプロジェクトファイルと誤認される可能性がある。
-    # tmpfsで上書きすることで、ワークスペースパス経由の重複アクセスを防ぐ。
-    # ワークスペース外のパスはコンテナ内から見えないため対応不要。
-    if [[ "$session_path/$ai_dir" == "$workdir"* ]]; then
-      session_mounts="--mount type=tmpfs,target=$session_path/$ai_dir,tmpfs-size=0 \\
-    $session_mounts"
-    fi
+    # realpath で解決した保存先を使い、ワークスペース経由の重複アクセスだけを隠す。
+    session_dir="$session_path/$ai_dir"
+  fi
+  if [[ "$session_dir" == "$workdir/"* ]]; then
+    session_mounts="--mount $(__aicontainer_quote_mount type=tmpfs "target=$session_dir" tmpfs-size=0) "
+  fi
+  if [ "$AI_TOOL" = "codex" ]; then
+    session_mounts+="--mount $(__aicontainer_quote_mount type=bind "source=$session_dir" target=/home/ubuntu/.codex)"
   else
-    # ディレクトリモード: 従来のローカルディレクトリを使用
-    # ワークスペース直下にai_dirが存在するため、AIがプロジェクトファイルと
-    # 誤認しないようtmpfsで隠す（実際のデータは~/.claude等に個別マウント済み）
-    if [ "$AI_TOOL" = "codex" ]; then
-      session_mounts="--mount type=tmpfs,target=$workdir/$ai_dir,tmpfs-size=0 \\
-    --mount type=bind,source=\"$workdir/$ai_dir\",target=/home/ubuntu/.codex"
-    else
-      session_mounts="--mount type=tmpfs,target=$workdir/$ai_dir,tmpfs-size=0 \\
-    --mount type=bind,source=\"$workdir/$ai_dir/.claude\",target=/home/ubuntu/.claude \\
-    --mount type=bind,source=\"$workdir/$ai_dir/.claude.json\",target=/home/ubuntu/.claude.json"
-    fi
+    session_mounts+="--mount $(__aicontainer_quote_mount type=bind "source=$session_dir/.claude" target=/home/ubuntu/.claude) \\
+    --mount $(__aicontainer_quote_mount type=bind "source=$session_dir/.claude.json" target=/home/ubuntu/.claude.json)"
   fi
 
   # docker-proxy有効時: プロキシソケットのマウントとDOCKER_HOSTを追加
@@ -783,16 +791,22 @@ aicontainer() {
     done
   fi
 
+  local quoted_workdir workspace_mount quoted_image quoted_command
+  printf -v quoted_workdir '%q' "$workdir"
+  workspace_mount="$(__aicontainer_quote_mount type=bind "source=$workdir" "target=$workdir")"
+  printf -v quoted_image '%q' "$config_image"
+  printf -v quoted_command '%q' "${init_cmd}$cmd"
+
   local docker_cmd="docker run -ti --rm \\
     --stop-timeout 0 \\
     $network_opts \\
-    -w \"$workdir\" \\
+    -w $quoted_workdir \\
     $extra_env \\
     $extra_opts \\
-    --mount type=bind,source=\"$workdir\",target=\"$workdir\" \\
+    --mount $workspace_mount \\
     $session_mounts$AI_MOUNT$AI_IGNORE \\
-    $config_image \\
-    $shell_prefix -ci \"${init_cmd}$cmd\""
+    $quoted_image \\
+    $shell_prefix -ci $quoted_command"
 
   local dns_setup=""
   if [ ${#AICONTAINER_ALLOW_DNS[@]} -gt 0 ]; then
