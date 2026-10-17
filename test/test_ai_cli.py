@@ -72,6 +72,7 @@ sys.exit(17)
         self.env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}",
                         CODEX_HOME=str(self.session), CLAUDE_CONFIG_DIR=str(self.session),
                         AICONTAINER_TEST_FEATURE_LIST=str(self.feature_list))
+        self.env.pop("AICONTAINER_CODEX_MODE", None)
 
     def run_cli(self, tool, *args, shell=False):
         cmd = [tool, *args]
@@ -80,12 +81,16 @@ sys.exit(17)
         return subprocess.run(cmd, cwd=self.workspace, env=self.env,
                               input="stdin payload\n", text=True, capture_output=True)
 
-    def assert_codex_arguments(self, arguments, user_arguments):
+    def assert_codex_arguments(self, arguments, user_arguments, mode="minimal"):
         self.assertEqual(arguments[0], "-c")
         self.assertEqual(tomllib.loads(arguments[1]), {"developer_instructions": self.content})
         self.assertEqual(arguments[2], "-c")
         self.assertEqual(tomllib.loads(arguments[3]), {"web_search": "disabled"})
         end = arguments.index("--no-daemon")
+        if mode == "restricted":
+            self.assertEqual(arguments[4:end], ["-c", "features.apps=false", "-c", "features.worktrees=false"])
+            self.assertEqual(arguments[end + 1:], user_arguments)
+            return
         switches = arguments[4:end]
         self.assertEqual(len(switches) % 2, 0)
         pairs = list(zip(switches[::2], switches[1::2]))
@@ -148,6 +153,39 @@ sys.exit(17)
         result = self.run_cli("codex", "exec", "two words")
         self.assertEqual(result.returncode, 17, result.stderr)
         self.assert_codex_arguments(json.loads(result.stdout)["args"], ["exec", "two words"])
+
+    def test_explicit_minimal_mode_preserves_the_allowlist(self):
+        self.env["AICONTAINER_CODEX_MODE"] = "minimal"
+        result = self.run_cli("codex", "exec", "two words")
+        self.assertEqual(result.returncode, 17, result.stderr)
+        self.assert_codex_arguments(json.loads(result.stdout)["args"], ["exec", "two words"])
+
+    def test_restricted_mode_only_disables_web_and_builtin_mcp_without_listing_features(self):
+        self.env["AICONTAINER_CODEX_MODE"] = "restricted"
+        self.env["AICONTAINER_TEST_FEATURE_LIST_EXIT"] = "23"
+        self.feature_list.unlink()
+        for shell in (False, True):
+            for args in ([], ["exec", "--json", "two words", ""], ["resume", "--last"]):
+                with self.subTest(shell=shell, args=args):
+                    result = self.run_cli("codex", *args, shell=shell)
+                    self.assertEqual(result.returncode, 17, result.stderr)
+                    record = json.loads(result.stdout)
+                    self.assert_codex_arguments(record["args"], args, mode="restricted")
+                    self.assertEqual(record["stdin"], "stdin payload\n")
+                    log, tool_stderr = result.stderr.splitlines()
+                    self.assertEqual(tool_stderr, "tool stderr")
+                    self.assertIn("features.apps=false", log)
+                    self.assertIn("features.worktrees=false", log)
+                    self.assertNotIn(self.content, log)
+        self.assertEqual((self.session / "config.toml").read_text(), self.config_content)
+
+    def test_unknown_mode_prevents_codex_launch_but_does_not_affect_claude(self):
+        self.env["AICONTAINER_CODEX_MODE"] = "unknown"
+        result = self.run_cli("codex")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("codex_mode", result.stderr)
+        self.assertEqual(self.run_cli("claude").returncode, 17)
 
     def test_launch_log_redacts_configs_prompts_and_environment_without_changing_arguments(self):
         prompt = 'private prompt\n$(touch injected)\x1b[31m'

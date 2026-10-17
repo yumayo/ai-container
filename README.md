@@ -64,7 +64,22 @@ aicontainer bash         # .aicontainer の tool を維持して bash を起動
 
 認証情報・チャット履歴はモードごとに `.claude.local` / `.codex.local` へ分離保存されます。
 
-Codex CLI は、起動のたびに実体の CLI で `features list` を取得し、次の機能だけを有効にします。それ以外は、現在の有効・無効にかかわらず `--disable` を渡します。将来追加された機能も一覧に載れば自動的に無効化されます。一覧の取得・解析に失敗した場合や空だった場合は起動を中止します。
+Codex CLI の機能制限は、`.aicontainer` の `codex_mode` で切り替えられます。
+
+| `codex_mode` | 起動時の設定 |
+| --- | --- |
+| `minimal`（既定） | 現在の最小構成。以下の許可リスト以外の feature を無効化します。 |
+| `restricted` | 許可リスト導入前のコミット `e7e0d15` と同じ構成。標準 Web 検索・ページ取得と、内蔵 MCP の `apps`・`worktrees` だけを無効化します。 |
+
+例えば、比較用の構成で起動する場合は次のように指定します。`minimal` に戻すと現在の最小構成になります。未指定時は `minimal`、それ以外の値や空の指定はエラーです。
+
+```ini
+codex_mode=restricted
+```
+
+`restricted` は `web_search=disabled`、`features.apps=false`、`features.worktrees=false` を渡します。`codex_apps` 経由の Web 検索や外部サービス連携と `codex_worktrees` 全体が無効になります。その他の feature は CLI の既定値・ユーザー設定を維持し、起動前の `features list` は実行しません。
+
+`minimal` は、起動のたびに実体の CLI で `features list` を取得し、次の機能だけを有効にします。それ以外は、現在の有効・無効にかかわらず `--disable` を渡します。将来追加された機能も一覧に載れば自動的に無効化されます。一覧の取得・解析に失敗した場合や空だった場合は起動を中止します。
 
 - `shell_tool`、`unified_exec`、`unified_exec_tty`: ローカルコマンドの実行・入出力
 - `view_image`: ローカル画像の表示
@@ -73,15 +88,17 @@ Codex CLI は、起動のたびに実体の CLI で `features list` を取得し
 - `fast_mode`: `/fast` による Fast mode の切り替え。この許可だけでは Fast mode を自動選択しません
 - `sleep_tool`: バックグラウンド処理の待ち合わせなどに使うローカルの待機ツール
 
-`codex_apps`、`codex_worktrees`、画像生成、ブラウザー操作、プラグインなどの機能は、この許可リストの対象外です。廃止済み・非推奨の互換フラグは指定対象から除きます。廃止済みのフラグは CLI が `true` と表示する場合があります。検索・ページ取得を行う標準 Web ツールも `web_search=disabled` で無効化します。Codex では WebFetch 相当のページ取得も標準 Web ツールが提供するため、個別の WebFetch 設定はありません。
+`codex_apps`、`codex_worktrees`、画像生成、ブラウザー操作、プラグインなどの機能は、この許可リストの対象外です。廃止済み・非推奨の互換フラグは指定対象から除きます。廃止済みのフラグは CLI が `true` と表示する場合があります。どちらのモードでも、検索・ページ取得を行う標準 Web ツールは `web_search=disabled` で無効化します。Codex では WebFetch 相当のページ取得も標準 Web ツールが提供するため、個別の WebFetch 設定はありません。
 
-許可リストは共通の起動ラッパーで適用するため、`aicontainer bash` 内からの直接起動や `codex exec` / `codex resume` にも適用されます。この変更の反映には、ホスト側で `bash install.sh main` を実行し、AIコンテナを起動し直してください。
+モードは起動時に環境変数 `AICONTAINER_CODEX_MODE` で共通の起動ラッパーに渡すため、`aicontainer bash` 内からの直接起動や `codex exec` / `codex resume`、WSL 起動にも適用されます。認証情報・履歴・ユーザー設定は両モードで共有します。比較する際は、同じモデル・同じ依頼で新しい会話を開始してください。
+
+初回の反映には、ホスト側で `.bash_ai_container` を更新して `source .bash_ai_container` で読み込み直し（コピーして利用している場合はコピー先も更新）、`bash install.sh main` を実行して AIコンテナを起動し直してください。その後のモード切り替えは `.aicontainer` を変更し、AIコンテナを起動し直すだけで反映されます。
 
 共通ラッパーは、実行直前のコマンドを `aicontainer: exec:` として標準エラーに表示します。実行ファイル、`--enable` / `--disable`、Web 検索設定などの自動追加した引数を、シェル用に引用して記録します。共通指示の本文と、呼び出し元が渡した設定値・プロンプト・未知の引数は `<redacted>` に置き換え、環境変数の値は出力しません。実際に渡す引数と標準出力は変更しないため、`codex exec --json` などにも利用できます。Claude の起動も同じ形式で記録します。
 
 共通指示とツールの無効化設定を `-c` で渡すため、Codex は `--no-daemon` を指定し、共有バックグラウンドサーバーを使わない方式（embedded mode）で起動します。これにより、設定の上書きに伴う `Running without the shared background server` の警告を防ぎます。
 
-現在はコンテナのファイアウォールを使い、Codex 自体は `--yolo` で起動します。Codex のサンドボックスによるローカルコマンドの通信制限と、OpenAI 側で実行する Web 検索・画像生成などの無効化は別の制御です。この許可リストは feature flags を制御するもので、一覧に載らない機能や別途登録した MCP、許可済み API を使うコマンドまで一括して遮断するものではありません。許可先の MCP サーバーや `dp` の実行先が行う外部通信も、その実行先で制限する必要があります。
+現在はコンテナのファイアウォールを使い、Codex 自体は `--yolo` で起動します。Codex のサンドボックスによるローカルコマンドの通信制限と、OpenAI 側で実行する Web 検索・画像生成などの無効化は別の制御です。`minimal` の許可リストは feature flags を制御するもので、一覧に載らない機能や別途登録した MCP、許可済み API を使うコマンドまで一括して遮断するものではありません。許可先の MCP サーバーや `dp` の実行先が行う外部通信も、その実行先で制限する必要があります。
 
 ## AIコンテナの共通指示
 
@@ -117,22 +134,13 @@ node_modules
 
 ### `.aicontainer` — コンテナ動作設定
 
+全設定の説明・既定値・複数行指定の可否を、コメント付きの [`example.aicontainer`](example.aicontainer) にまとめています。新規作成時はワークスペース直下の `.aicontainer` にコピーし、必要な設定行の先頭の `#` を外して使ってください。全設定をコメントにしているため、そのままコピーすると既定値で動作します。
+
+```sh
+cp example.aicontainer /path/to/project/.aicontainer
 ```
-append-network=myproject               # 追加で参加するDockerネットワーク名（複数行指定可）
-allow-dns=mcp-server                   # 追加で通信を許可するコンテナ名・ドメイン名（複数行指定可）
-allow-ip=192.168.1.10                  # 追加で通信を許可するIPv4アドレス・CIDR（複数行指定可）
-session=../                            # セッション共有パス（複数プロジェクトで共有可能）
-image=yumayo-ai-custom                 # 使用するDockerイメージ（デフォルト: yumayo-ai）
-tool=claude                            # 既定ツール（claude / codex）
-path=./bin                             # コンテナ内PATHに追加（複数行指定可）
-env=CLAUDE_CODE_EFFORT_LEVEL=max       # コンテナに環境変数を追加（複数行指定可）
-before-start-up=./setup.sh             # コンテナ起動前にホスト側で実行するコマンド
-docker-proxy-name=myproject            # Docker Socket Proxyを有効化（プロキシ名を指定）
-docker-proxy-allow=npx playwright*     # execで許可するコマンド（1行1ルール、複数行指定可）
-docker-proxy-allow=node
-docker-proxy-containers=myapp         # execを許可するコンテナ名（複数行指定可、記載順で転送）
-docker-proxy-containers=mydb
-```
+
+説明のコメントは設定行とは別の行に書いてください。設定変更後はAIコンテナを起動し直すと反映されます。
 
 AIコンテナは常に、外部通信用の専用bridgeネットワーク（`public_network`）に参加します。Docker上の名前は起動ごとに `yumayo-ai-<小文字英数字のランダム値>` として生成し、コンテナ間通信を無効化します。AIコンテナ終了時にこの専用ネットワークも削除します。
 

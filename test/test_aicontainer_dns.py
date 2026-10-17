@@ -151,6 +151,45 @@ sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
     def docker_events(self):
         return [json.loads(line) for line in (self.root / "docker-events.jsonl").read_text().splitlines()]
 
+    def test_codex_mode_reaches_normal_bash_and_dump_launches(self):
+        for mode in ("minimal", "restricted"):
+            self.config.write_text(f"tool=codex\ncodex_mode={mode}\n")
+            for command in ((), ("codex",), ("bash",), ("dump", "codex"), ("dump", "bash")):
+                with self.subTest(mode=mode, command=command):
+                    result = self.run_launcher(*command)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    if command[:1] == ("dump",):
+                        script = result.stdout[result.stdout.index("(\n"):]
+                        execution = subprocess.run(["bash"], input=script, cwd=self.root,
+                                                   env=self.env, text=True, capture_output=True)
+                        self.assertEqual(execution.returncode, 0, execution.stdout + execution.stderr)
+                    args = json.loads(self.calls.read_text())["args"]
+                    self.assertIn(f"AICONTAINER_CODEX_MODE={mode}", args)
+                    self.assertIn("FIREWALL_MODE=codex", args)
+                    expected = "bash" if command[-1:] == ("bash",) else "codex --yolo -c web_search=disabled"
+                    self.assertEqual(args[-1], expected)
+
+    def test_codex_mode_defaults_to_minimal_and_accepts_quotes_comments_and_crlf(self):
+        for setting, mode in (("", "minimal"), ("codex_mode=minimal\n", "minimal"),
+                              ("codex_mode= 'restricted'   # comparison\r\n", "restricted")):
+            with self.subTest(setting=setting):
+                self.config.write_text(setting)
+                result = self.run_launcher("codex")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(f"AICONTAINER_CODEX_MODE={mode}", json.loads(self.calls.read_text())["args"])
+
+    def test_invalid_codex_mode_fails_before_hooks_or_docker(self):
+        for mode in ("", "unknown", "minimal restricted", "$(touch injected)"):
+            with self.subTest(mode=mode):
+                self.config.write_text(f"codex_mode={mode}\nbefore-start-up=touch hook-ran\n"
+                                       "docker-proxy-name=example\n")
+                result = self.run_launcher("codex")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("codex_mode", result.stderr)
+                self.assertFalse((self.root / "docker-events.jsonl").exists())
+                self.assertFalse((self.root / "hook-ran").exists())
+                self.assertFalse((self.root / "injected").exists())
+
     def test_old_docker_versions_fail_before_hook_proxy_or_network_creation(self):
         self.config.write_text("append-network=project\ndocker-proxy-name=project\n"
                                "before-start-up=touch hook-ran\n")

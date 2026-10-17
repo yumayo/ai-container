@@ -212,6 +212,22 @@ __aicontainer_parse_config() {
       elif [ "$key" = "dns" ]; then
         __aicontainer_log_error "dns は allow-dns に変更されました。設定ファイル .aicontainer を更新してください。"
         return 1
+      elif [ "$key" = "codex_mode" ]; then
+        value="${value%%#*}"
+        value="${value#"${value%%[![:space:]]*}"}"
+        value="${value%"${value##*[![:space:]]}"}"
+        if [[ "$value" =~ ^\"(.*)\"$ ]] || [[ "$value" =~ ^\'(.*)\'$ ]]; then
+          value="${BASH_REMATCH[1]}"
+        fi
+        case "$value" in
+          minimal|restricted) ;;
+          *)
+            __aicontainer_log_error "codex_mode は minimal または restricted を指定してください。"
+            return 1
+            ;;
+        esac
+        AICONTAINER_CONFIG["$key"]="$value"
+        __aicontainer_log_info "config: $key=$value"
       elif [ "$key" = "append-network" ]; then
         value="${value%"${value##*[![:space:]]}"}"
         if [[ "$value" =~ ^\"(.*)\"$ ]] || [[ "$value" =~ ^\'(.*)\'$ ]]; then
@@ -420,6 +436,7 @@ aicontainer() {
   printf -v config_docker_proxy_containers '%s\n' "${AICONTAINER_PROXY_CONTAINERS[@]}"
   config_docker_proxy_containers="${config_docker_proxy_containers%$'\n'}"
   local config_image="${AICONTAINER_CONFIG[image]:-yumayo-ai}"
+  local config_codex_mode="${AICONTAINER_CONFIG[codex_mode]:-minimal}"
 
   # ツールモードを決定（明示引数 > .aicontainer > デフォルト）
   # 既知のツール名で始まらない場合は、引数をコンテナ内コマンドとして扱う。
@@ -671,6 +688,8 @@ aicontainer() {
       extra_env="$extra_env -e $env_entry"
     done
   fi
+  # bash内からCodexを直接起動する場合にも、起動時に選んだモードを引き継ぐ。
+  extra_env="$extra_env -e AICONTAINER_CODEX_MODE=$config_codex_mode"
 
   # docker-proxyの起動（dumpモード時はスキップ）
   if [ -n "$config_docker_proxy_name" ] && [ "$dump_mode" != true ]; then

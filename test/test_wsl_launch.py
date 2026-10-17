@@ -88,6 +88,16 @@ class WslLaunchTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.root / "docker-events.jsonl").exists())
 
+    def test_codex_modes_are_passed_through_wsl_launches(self):
+        for mode in ("minimal", "restricted"):
+            self.config.write_text(f"tool=codex\ncodex_mode={mode}\n")
+            for tool in ("codex", "bash"):
+                with self.subTest(mode=mode, tool=tool):
+                    result = self.launch(tool)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    args = json.loads(self.calls.read_text())["args"]
+                    self.assertIn(f"AICONTAINER_CODEX_MODE={mode}", args)
+
     def test_launch_profile_is_readonly_and_contents_never_enter_docker_arguments(self):
         profile = self.root / 'profile 日本語 $(touch injected).json'
         secret = "secret-for-wsl-profile-test"
