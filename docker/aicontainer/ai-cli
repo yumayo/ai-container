@@ -5,6 +5,45 @@ set -euo pipefail
 prompt_file=/etc/aicontainer/system-prompt.md
 tool="${0##*/}"
 
+# 実行する配列から表示用のコピーを作り、stdoutや引数自体を変更せずに記録する。
+launch() {
+    local generated_count="$1"
+    shift
+    local -a command=("$@") displayed=("$@")
+    local i hide_next=false hide_rest=false
+    for ((i = 0; i < ${#displayed[@]}; i++)); do
+        if ((i < generated_count)); then
+            if [[ ${displayed[i]} == developer_instructions=* ]]; then
+                displayed[i]='developer_instructions=<redacted>'
+            fi
+            continue
+        fi
+        # 呼び出し元の設定値・プロンプト・未知の引数には秘密が含まれ得る。
+        if [[ "$hide_next" == true || "$hide_rest" == true ]]; then
+            displayed[i]='<redacted>'
+            hide_next=false
+            continue
+        fi
+        case "${displayed[i]}" in
+            --)
+                hide_rest=true
+                ;;
+            -c|--config|--enable|--disable|-m|--model|-s|--sandbox|-a|--ask-for-approval|-p|--profile|-C|--cd|-i|--image|--mcp-config)
+                hide_next=true
+                ;;
+            exec|resume|review|features|list|--last|--json|--yolo|--dangerously-bypass-approvals-and-sandbox|--no-daemon|--version|--help|-h|--continue|--print)
+                ;;
+            *)
+                displayed[i]='<redacted>'
+                ;;
+        esac
+    done
+    printf 'aicontainer: exec:' >&2
+    printf ' %q' "${displayed[@]}" >&2
+    printf '\n' >&2
+    exec "${command[@]}"
+}
+
 if [[ ! -f "$prompt_file" || ! -r "$prompt_file" ]]; then
     printf 'aicontainer: 共通システムプロンプトを読み込めません: %s\n' "$prompt_file" >&2
     # ファイルの欠落だけでなく、親ディレクトリの通過権限不足も確認できるようにする。
@@ -16,16 +55,50 @@ fi
 
 case "$tool" in
     claude)
-        exec /usr/local/lib/aicontainer/bin/claude --append-system-prompt-file "$prompt_file" "$@"
+        command=(/usr/local/lib/aicontainer/bin/claude --append-system-prompt-file "$prompt_file")
+        launch "${#command[@]}" "${command[@]}" "$@"
         ;;
     codex)
+        # ラッパー自身を呼ぶと再帰するため、実体のCLIから機能名を取得する。
+        if ! feature_list=$(/usr/local/lib/aicontainer/bin/codex --no-daemon features list); then
+            printf 'aicontainer: Codex の機能一覧を取得できないため、起動を中止します。\n' >&2
+            exit 1
+        fi
+        feature_args=()
+        while read -r -a fields; do
+            ((${#fields[@]} > 0)) || continue
+            # stageには "under development" のような空白があるため、最終列を読む。
+            if ((${#fields[@]} < 3)) || [[ ! ${fields[0]} =~ ^[a-z][a-z0-9_.-]*$ ]] ||
+                [[ ${fields[-1]} != true && ${fields[-1]} != false ]]; then
+                printf 'aicontainer: Codex の機能一覧を解析できないため、起動を中止します。\n' >&2
+                exit 1
+            fi
+            # 廃止済み・非推奨の互換フラグは新しい機能ではなく、指定を無視されるものもある。
+            case "${fields[1]}" in
+                removed|deprecated) continue ;;
+            esac
+            # ローカル操作と推論速度の切り替えに使う機能だけを明示的に許可する。
+            case "${fields[0]}" in
+                shell_tool|unified_exec|unified_exec_tty|view_image|hooks|code_mode_host|fast_mode|sleep_tool)
+                    feature_args+=(--enable "${fields[0]}")
+                    ;;
+                *)
+                    # 現在falseの機能も対象にし、プロファイル等による有効化を防ぐ。
+                    feature_args+=(--disable "${fields[0]}")
+                    ;;
+            esac
+        done <<< "$feature_list"
+        if ((${#feature_args[@]} == 0)); then
+            printf 'aicontainer: Codex の機能一覧が空のため、起動を中止します。\n' >&2
+            exit 1
+        fi
         # JSON文字列はTOMLの基本文字列としても有効。改行・引用符を含む本文を1引数で渡す。
         instructions=$(node -e 'process.stdout.write(JSON.stringify(require("node:fs").readFileSync(process.argv[1], "utf8")))' "$prompt_file")
-        # Bash内からの直接起動やサブコマンドでも、標準Webツールと内蔵MCPを無効化する。
+        # Bash内からの直接起動やサブコマンドでも、同じ許可リストを適用する。
         # -cによる設定注入はembedded modeが必要なため、共有サーバーを使わないことを明示する。
-        exec /usr/local/lib/aicontainer/bin/codex -c "developer_instructions=$instructions" \
-            -c 'web_search="disabled"' -c features.apps=false -c features.worktrees=false \
-            --no-daemon "$@"
+        command=(/usr/local/lib/aicontainer/bin/codex -c "developer_instructions=$instructions"
+            -c 'web_search="disabled"' "${feature_args[@]}" --no-daemon)
+        launch "${#command[@]}" "${command[@]}" "$@"
         ;;
     *)
         printf 'aicontainer: 対応していない AI ツールです: %s\n' "$tool" >&2
