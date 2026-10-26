@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -266,15 +268,47 @@ func configuredContainers(value string) []string {
 	return names
 }
 
-func run(cmd []string) (int, error) {
-	const usage = "使い方: dp コマンド [引数 ...]\n例: dp npx playwright --version"
-	if len(cmd) == 0 {
+func run(args []string) (int, error) {
+	const usage = "使い方: dp [-p コンテナ名] [-c ディレクトリ] コマンド [引数 ...]\n" +
+		"  -p, --proxy-container-name コンテナ名  登録済みのそのコンテナだけで実行します。\n" +
+		"  -c, --cwd ディレクトリ  実行先の作業ディレクトリ（省略時は現在のディレクトリ）。\n" +
+		"例: dp npx playwright --version\n" +
+		"例: dp --proxy-container-name workdir-dotnet-1 dotnet --version\n" +
+		"例: dp -p workdir-dotnet-1 -c /path/to/current-directory dotnet --version"
+	var containerName string
+	workingDirectory := "."
+	options := flag.NewFlagSet("dp", flag.ContinueOnError)
+	options.SetOutput(io.Discard)
+	setContainerName := func(value string) error {
+		if strings.TrimSpace(value) == "" {
+			return errors.New("コンテナ名を指定してください")
+		}
+		containerName = value
+		return nil
+	}
+	options.Func("proxy-container-name", "実行先のコンテナ名", setContainerName)
+	options.Func("p", "実行先のコンテナ名", setContainerName)
+	setWorkingDirectory := func(value string) error {
+		if value == "" {
+			return errors.New("作業ディレクトリを指定してください")
+		}
+		workingDirectory = value
+		return nil
+	}
+	options.Func("cwd", "実行先の作業ディレクトリ", setWorkingDirectory)
+	options.Func("c", "実行先の作業ディレクトリ", setWorkingDirectory)
+	if err := options.Parse(args); errors.Is(err, flag.ErrHelp) {
+		fmt.Fprintln(os.Stdout, usage)
+		return 0, nil
+	} else if err != nil {
+		fmt.Fprintln(os.Stderr, "dp:", err)
 		fmt.Fprintln(os.Stderr, usage)
 		return 2, nil
 	}
-	if len(cmd) == 1 && cmd[0] == "--help" {
-		fmt.Fprintln(os.Stdout, usage)
-		return 0, nil
+	cmd := options.Args()
+	if len(cmd) == 0 {
+		fmt.Fprintln(os.Stderr, usage)
+		return 2, nil
 	}
 	host := os.Getenv("DOCKER_HOST")
 	if !strings.HasPrefix(host, "unix:///") {
@@ -298,9 +332,23 @@ func run(cmd []string) (int, error) {
 	if len(names) == 0 {
 		return 0, errors.New("実行先のコンテナが登録されていません。.aicontainer に docker-proxy-containers を設定し、aicontainer を起動し直してください。")
 	}
-	cwd, err := os.Getwd()
+	if containerName != "" {
+		registered := false
+		for _, name := range names {
+			if name == containerName {
+				registered = true
+				break
+			}
+		}
+		if !registered {
+			fmt.Fprintf(os.Stderr, "dp: コンテナ %q でのコマンド実行は許可されていません。.aicontainer に docker-proxy-containers=%s を追加し、aicontainer を起動し直してください。\n", containerName, containerName)
+			return 126, nil
+		}
+		names = []string{containerName}
+	}
+	cwd, err := filepath.Abs(workingDirectory)
 	if err != nil {
-		return 0, fmt.Errorf("現在の作業ディレクトリを取得できませんでした。詳細: %w", err)
+		return 0, fmt.Errorf("作業ディレクトリの絶対パスを取得できませんでした。詳細: %w", err)
 	}
 	tty := isTerminal(os.Stdin.Fd()) && isTerminal(os.Stdout.Fd()) && isTerminal(os.Stderr.Fd())
 	attempted := false
@@ -335,7 +383,11 @@ func run(cmd []string) (int, error) {
 		}
 		return code, err
 	}
-	if !attempted {
+	if containerName != "" && !attempted {
+		fmt.Fprintf(os.Stderr, "dp: 指定したコンテナ %q が起動していません。対象のコンテナを起動してください。\n", containerName)
+	} else if containerName != "" {
+		fmt.Fprintf(os.Stderr, "dp: 指定したコンテナ %q にコマンド %q が見つかりません\n", containerName, cmd[0])
+	} else if !attempted {
 		fmt.Fprintln(os.Stderr, "dp: 登録済みのコンテナが起動していません。.aicontainer の docker-proxy-containers を確認し、対象のコンテナを起動してください。")
 	} else {
 		fmt.Fprintf(os.Stderr, "dp: 登録済みの起動中コンテナにコマンド %q が見つかりません\n", cmd[0])

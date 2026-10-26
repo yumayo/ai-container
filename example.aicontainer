@@ -148,9 +148,12 @@
 # 以下の3項目を設定し、実行先のコンテナをホスト側で先に起動してください。
 # AIコンテナ内からは dp COMMAND [ARG ...] で実行します。
 # 例: dp npx playwright test / dp pytest tests/
+# 実行先の指定: dp -p workdir-dotnet-1 dotnet --version（--proxy-container-name も使用可）
+# 作業ディレクトリの指定: dp -p workdir-dotnet-1 -c /app dotnet test（--cwd も使用可）
 # 許可ルールには dp を付けません。
 # プロキシはUnixソケットを使うため、append-network / allow-dns の指定は不要です。
-# 作業ディレクトリを引き継ぐため、実行先にも同じ絶対パスでプロジェクトをマウントします。
+# 既定では作業ディレクトリを引き継ぐため、実行先にも同じ絶対パスでプロジェクトをマウントします。
+# 実行先のパスが異なる場合は -c で指定してください。
 
 # docker-proxy-name
 # 既定: 無効
@@ -176,6 +179,7 @@
 # Composeのサービス名やコンテナIDではなく、docker ps に表示される名前を指定します。
 # dp は記載順に試し、実行ファイルがPATHにない場合だけ次のコンテナへ進みます。
 # 実行開始後の失敗は、別コンテナでは再実行しません。
+# -p（--proxy-container-name）に登録済みの名前を指定すると、そのコンテナだけで実行します。
 # docker-proxy-containers=myapp
 # docker-proxy-containers=mytools
 

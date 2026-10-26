@@ -154,6 +154,105 @@ test('dp tries configured containers and preserves argv, cwd, streams and exit c
   await assert.rejects(fs.stat(path.join(dir, 'injected')), { code: 'ENOENT' });
 });
 
+test('an explicit container overrides registration order and preserves remote arguments', async (t) => {
+  for (const selector of [['--proxy-container-name', 'second'], ['--proxy-container-name=second'], ['-p', 'second'], ['-p=second']]) {
+    await t.test(selector.join(' '), async (t) => {
+      const { run, calls, dir } = await fixture(t, { exitCode: 7 });
+      const args = ['dotnet', '--version', '--proxy-container-name', 'first', '-p', 'first', '-c', '/remote', '--cwd=/other', '--help', 'argument with spaces', '', '$(touch injected)'];
+      const result = await run([...selector, ...args]);
+      assert.deepEqual(result, { code: 7, stdout: 'stdout\n', stderr: 'stderr\n' });
+      const creates = calls.filter((c) => c.path.endsWith('/exec'));
+      assert.equal(creates.length, 1);
+      assert.equal(creates[0].path, '/containers/second/exec');
+      assert.deepEqual(creates[0].body, {
+        Cmd: args, WorkingDir: dir, AttachStdin: true, AttachStdout: true, AttachStderr: true, Tty: false,
+      });
+      await assert.rejects(fs.stat(path.join(dir, 'injected')), { code: 'ENOENT' });
+    });
+  }
+});
+
+test('a missing executable in the selected container never falls back to another container', async (t) => {
+  const { run, calls } = await fixture(t, { absent: ['first'] });
+  const result = await run(['-p', 'first', missing]);
+  assert.equal(result.code, 127);
+  assert.match(result.stderr, /指定したコンテナ "first" にコマンド .* が見つかりません/);
+  assert.deepEqual(calls.filter((c) => c.path.endsWith('/exec')).map((c) => c.path), ['/containers/first/exec']);
+  assert.equal(calls.filter((c) => c.path.endsWith('/start')).length, 1);
+});
+
+test('a stopped selected container is reported without executing in a running container', async (t) => {
+  const { run, calls } = await fixture(t);
+  const result = await run(['-p', 'stopped', missing], {
+    env: { DOCKER_PROXY_CONTAINERS: 'first\nstopped' },
+  });
+  assert.equal(result.code, 127);
+  assert.match(result.stderr, /指定したコンテナ "stopped" が起動していません/);
+  assert.equal(calls.filter((c) => c.path.endsWith('/exec')).length, 0);
+});
+
+test('an explicit container must exactly match a registered name even when it is running', async (t) => {
+  const { run, calls } = await fixture(t, { containers: ['registered', 'unregistered'] });
+  const result = await run(['-p', 'unregistered', missing], {
+    env: { DOCKER_PROXY_CONTAINERS: 'registered' },
+  });
+  assert.equal(result.code, 126);
+  assert.match(result.stderr, /コンテナ "unregistered" でのコマンド実行は許可されていません/);
+  assert.match(result.stderr, /docker-proxy-containers=unregistered/);
+  assert.equal(calls.filter((c) => c.path.endsWith('/exec')).length, 0);
+});
+
+test('explicit selection still enforces the proxy command allow-list', async (t) => {
+  const { run, calls } = await fixture(t, { forbidden: true });
+  const result = await run(['-p', 'second', missing]);
+  assert.equal(result.code, 126);
+  assert.match(result.stderr, /許可されていません。docker-proxy-allow/);
+  assert.deepEqual(calls.filter((c) => c.path.endsWith('/exec')).map((c) => c.path), ['/containers/second/exec']);
+  assert.equal(calls.filter((c) => c.path.endsWith('/start')).length, 0);
+});
+
+test('working directory options select a remote path without requiring it locally', async (t) => {
+  const cases = [
+    { options: ['-p', 'second', '-c', '/remote directory/$(touch injected)'], directory: '/remote directory/$(touch injected)' },
+    { options: ['-c=/remote/work', '-p', 'second'], directory: '/remote/work' },
+    { options: ['--proxy-container-name', 'second', '--cwd', '/remote/work'], directory: '/remote/work' },
+    { options: ['--cwd=/remote/work', '-p', 'second'], directory: '/remote/work' },
+    { options: ['-p', 'second', '-c', 'nested/../relative directory'], directory: 'relative directory' },
+  ];
+  for (const { options, directory } of cases) {
+    await t.test(options.join(' '), async (t) => {
+      const { run, calls, dir } = await fixture(t);
+      const args = ['dotnet', 'test', '-c', 'Release'];
+      const result = await run([...options, ...args]);
+      assert.deepEqual(result, { code: 0, stdout: 'stdout\n', stderr: 'stderr\n' });
+      const creates = calls.filter((c) => c.path.endsWith('/exec'));
+      assert.equal(creates.length, 1);
+      assert.equal(creates[0].path, '/containers/second/exec');
+      assert.equal(creates[0].body.WorkingDir, path.resolve(dir, directory));
+      assert.deepEqual(creates[0].body.Cmd, args);
+      await assert.rejects(fs.stat(path.join(dir, 'injected')), { code: 'ENOENT' });
+    });
+  }
+});
+
+test('a working directory override is reused during automatic container selection', async (t) => {
+  const { run, calls } = await fixture(t, { absent: ['first'] });
+  const result = await run(['-c', '/remote/work', missing]);
+  assert.equal(result.code, 0);
+  const creates = calls.filter((c) => c.path.endsWith('/exec'));
+  assert.deepEqual(creates.map((c) => c.path), ['/containers/first/exec', '/containers/second/exec']);
+  assert.deepEqual(creates.map((c) => c.body.WorkingDir), ['/remote/work', '/remote/work']);
+});
+
+test('a missing remote working directory reports the Docker error without retrying', async (t) => {
+  const { run, calls } = await fixture(t, { startError: 'chdir to cwd: no such file or directory' });
+  const result = await run(['-p', 'second', '-c', '/missing/remote/directory', missing]);
+  assert.equal(result.code, 125);
+  assert.match(result.stderr, /chdir to cwd: no such file or directory/);
+  assert.deepEqual(calls.filter((c) => c.path.endsWith('/exec')).map((c) => c.path), ['/containers/second/exec']);
+  assert.equal(calls.filter((c) => c.path.endsWith('/start')).length, 1);
+});
+
 test('stdin is preserved after an absent executable and EOF reaches the remote command', async (t) => {
   const { run } = await fixture(t, { absent: ['first'], echoInput: true });
   const input = '入力\n'.repeat(100000);
@@ -306,10 +405,41 @@ test('usage and help work without a proxy', async (t) => {
   const { run, calls } = await fixture(t);
   const usage = await run([], { env: { DOCKER_HOST: '' } });
   assert.equal(usage.code, 2);
-  assert.match(usage.stderr, /使い方: dp コマンド/);
+  assert.match(usage.stderr, /使い方: dp \[-p コンテナ名\] \[-c ディレクトリ\] コマンド/);
   const help = await run(['--help'], { env: { DOCKER_HOST: '' } });
   assert.equal(help.code, 0);
   assert.match(help.stdout, /dp npx playwright --version/);
+  assert.match(help.stdout, /dp --proxy-container-name workdir-dotnet-1 dotnet --version/);
+  assert.match(help.stdout, /-p, --proxy-container-name/);
+  assert.match(help.stdout, /-c, --cwd/);
+  assert.match(help.stdout, /dp -p workdir-dotnet-1 -c \/path\/to\/current-directory dotnet --version/);
+  assert.equal(calls.length, 0);
+});
+
+test('invalid selectors and missing commands report usage without contacting the proxy', async (t) => {
+  const { run, calls } = await fixture(t);
+  for (const args of [
+    ['--proxy-container-name'],
+    ['--proxy-container-name='],
+    ['--proxy-container-name', ' ', missing],
+    ['--proxy-container-name', 'second'],
+    ['-p'],
+    ['-p='],
+    ['-p', ' ', missing],
+    ['-p', 'second'],
+    ['-c'],
+    ['-c=', missing],
+    ['-c', '/remote/work'],
+    ['--cwd'],
+    ['--cwd=', missing],
+    ['-p', 'second', '-c', '/remote/work'],
+    ['--unknown-option', missing],
+  ]) {
+    const result = await run(args, { env: { DOCKER_HOST: '' } });
+    assert.equal(result.code, 2, JSON.stringify(args));
+    assert.equal(result.stdout, '');
+    assert.match(result.stderr, /使い方: dp/);
+  }
   assert.equal(calls.length, 0);
 });
 
