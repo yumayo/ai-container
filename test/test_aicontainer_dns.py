@@ -1031,6 +1031,53 @@ print(directory)
                 self.assertFalse(any("type=tmpfs" in arg for arg in args))
                 self.assertIn(f"type=bind,source={workspace},target={workspace}", args)
 
+    def test_aimount_modes_apply_to_files_and_directories_in_the_same_launch(self):
+        workspace = self.root / "workspace"
+        workspace.mkdir()
+        source_dir = workspace / 'data, 日本語 "quote" $(touch injected)'
+        source_dir.mkdir()
+        source_file = source_dir / 'config, 日本語 "quote".txt'
+        source_file.write_text("config")
+        self.env.update(MOUNT_SOURCE=str(source_file), MOUNT_TARGET="/workspace/config:archive",
+                        MOUNT_MODE="ro")
+        (workspace / ".aimount").write_text(
+            f"{source_dir.name}:/workspace/reference:ro\r\n"
+            f"{source_dir}:/workspace/output:rw\r\n"
+            f"{source_dir.name}:/workspace/data\r\n"
+            "$MOUNT_SOURCE:$MOUNT_TARGET:$MOUNT_MODE\r\n"
+            f"{source_file}:/workspace/writable-config:rw\r\n"
+            f"{source_file}:/workspace/default-config\r\n"
+            f"{source_dir}:/workspace/data:archive\r\n"
+            f"{source_dir}:/workspace/output:archive:rw"
+        )
+        for tool in ("claude", "codex"):
+            for dump in (False, True):
+                with self.subTest(tool=tool, dump=dump):
+                    args = self.run_workspace_launcher(workspace, tool, dump)
+                    self.assertIn(f"type=bind,source={source_dir},target=/workspace/reference,readonly", args)
+                    for target in ("/workspace/output", "/workspace/data", "/workspace/data:archive",
+                                   "/workspace/output:archive"):
+                        mount = f"type=bind,source={source_dir},target={target}"
+                        self.assertIn(mount, args)
+                        self.assertNotIn(mount + ",readonly", args)
+                    self.assertIn(f"type=bind,source={source_file},target=/workspace/config:archive,readonly", args)
+                    for target in ("/workspace/writable-config", "/workspace/default-config"):
+                        mount = f"type=bind,source={source_file},target={target}"
+                        self.assertIn(mount, args)
+                        self.assertNotIn(mount + ",readonly", args)
+
+    def test_aimount_empty_destination_with_mode_fails_before_docker(self):
+        source = self.root / "data"
+        source.mkdir()
+        for mode in ("ro", "rw"):
+            (self.root / ".aimount").write_text(f"{source}::{mode}\n")
+            for command in (("codex",), ("dump", "codex")):
+                with self.subTest(mode=mode, command=command):
+                    result = self.run_launcher(*command)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("invalid format", result.stderr)
+                    self.assertFalse((self.root / "docker-events.jsonl").exists())
+
     def test_aimount_literal_relative_and_absolute_paths_are_not_shell_commands(self):
         workspace = self.root / "workspace 日本語"
         workspace.mkdir()
@@ -1078,18 +1125,19 @@ print(directory)
         self.env["MOUNT_SOURCE"] = str(additional)
         target = "/workspace/mounted  日本語 'quote' `touch injected`"
         self.env["MOUNT_TARGET"] = target
-        (workspace / ".aimount").write_text("$MOUNT_SOURCE:$MOUNT_TARGET\n")
         entries = ("hidden  directory $(touch injected)", "secret 'file' `touch injected`")
         for root in (workspace, additional):
             (root / entries[0]).mkdir()
             (root / entries[1]).write_text("secret")
             (root / ".aiignore").write_text("\n".join(entries) + "\n")
-        for dump in (False, True):
-            with self.subTest(dump=dump):
-                args = self.run_workspace_launcher(workspace, "codex", dump)
-                for mount_target in (str(workspace), target):
-                    self.assertIn(f"type=tmpfs,target={mount_target}/{entries[0]},tmpfs-size=0", args)
-                    self.assertIn(f"type=bind,source=/dev/null,target={mount_target}/{entries[1]},readonly", args)
+        for mode in ("", ":ro", ":rw"):
+            (workspace / ".aimount").write_text(f"$MOUNT_SOURCE:$MOUNT_TARGET{mode}\n")
+            for dump in (False, True):
+                with self.subTest(mode=mode, dump=dump):
+                    args = self.run_workspace_launcher(workspace, "codex", dump)
+                    for mount_target in (str(workspace), target):
+                        self.assertIn(f"type=tmpfs,target={mount_target}/{entries[0]},tmpfs-size=0", args)
+                        self.assertIn(f"type=bind,source=/dev/null,target={mount_target}/{entries[1]},readonly", args)
 
 
 if __name__ == "__main__":

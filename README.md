@@ -202,9 +202,13 @@ AIツール側のMCP接続URLは、サーバーの設定に合わせて、例え
 
 ```
 ./data:/workspace/data
-$HOME/.gitconfig:/workspace/.gitconfig
+./reference:/workspace/reference:ro
+./output:/workspace/output:rw
+$HOME/.gitconfig:/workspace/.gitconfig:ro
 ${API_KEY?}:/workspace/api-key
 ```
+
+形式は `ホストパス:コンテナパス[:ro|rw]` です。末尾に `:ro` を付けると読み取り専用、`:rw` または省略時は読み書き可能になります。ファイル・ディレクトリのどちらにも指定できます。
 
 環境変数展開（`$VAR`, `${VAR:-default}`, `${VAR?}` 等）に対応。パスの空白・日本語・引用符はそのまま保持し、`$()` やバッククォートはコマンドとして実行しません。ワークスペース、`session`、`.aiignore` も同じパスを使用し、`session` の保存先は正規化した実パスでマウントします。
 

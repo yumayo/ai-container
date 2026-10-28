@@ -408,13 +408,18 @@ __aicontainer_cleanup_unused_networks() {
 __aicontainer_prepare_mount() {
   local src="$1"
   local dst="$2"
+  local mode="${3:-rw}"
+  local -a mount_options=(type=bind "source=$src" "target=$dst")
   local started_at
 
   started_at="$(__aicontainer_now_ms)"
   __aicontainer_log_step "mount start: $src -> $dst"
 
+  if [ "$mode" = ro ]; then
+    mount_options+=(readonly)
+  fi
   AI_MOUNT="$AI_MOUNT \\
-    --mount $(__aicontainer_quote_mount type=bind "source=$src" "target=$dst")"
+    --mount $(__aicontainer_quote_mount "${mount_options[@]}")"
 
   if [ -d "$src" ]; then
     __aicontainer_process_aiignore_in_dir "$src" "$dst"
@@ -636,10 +641,17 @@ aicontainer() {
         return 1
       fi
 
-      # 展開後の行を:で分割
+      # 最初の:でパスを分割し、末尾の:ro / :rwだけをモードとして取り出す。
       IFS=':' read -r src dst <<< "$expanded_line"
+      local mount_mode=rw
+      case "$dst" in
+        *:ro|*:rw)
+          mount_mode="${dst##*:}"
+          dst="${dst%:*}"
+          ;;
+      esac
       if [ -z "$src" ] || [ -z "$dst" ]; then
-        echo "Error: invalid format (expected 'src:dst'): $line" >&2
+        echo "Error: invalid format (expected 'src:dst[:ro|rw]'): $line" >&2
         return 1
       fi
 
@@ -652,7 +664,7 @@ aicontainer() {
       fi
 
       src="$(realpath "$src")"
-      __aicontainer_prepare_mount "$src" "$dst"
+      __aicontainer_prepare_mount "$src" "$dst" "$mount_mode"
     done < .aimount
   fi
 
