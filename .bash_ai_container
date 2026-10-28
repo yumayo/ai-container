@@ -708,6 +708,18 @@ aicontainer() {
       extra_env="$extra_env -e $env_entry"
     done
   fi
+  # Poppy等の呼び出し元が用意したホスト側Unixソケットを自動で渡す。
+  # ソケットだけをマウントし、親ディレクトリやDocker権限は公開しない。
+  if [ -n "${AICONTAINER_EVENT_SOCKET:-}" ]; then
+    if [[ "$AICONTAINER_EVENT_SOCKET" != /* ]] || [ ! -S "$AICONTAINER_EVENT_SOCKET" ]; then
+      __aicontainer_log_error "通知用Unixソケットが見つかりません。起動元のターミナルを開き直してください。"
+      return 1
+    fi
+    local event_mount
+    event_mount="$(__aicontainer_quote_mount type=bind "source=$AICONTAINER_EVENT_SOCKET" target=/tmp/aicontainer-events.sock readonly)"
+    extra_opts="$extra_opts --mount $event_mount"
+    extra_env="$extra_env -e AICONTAINER_EVENT_SOCKET=/tmp/aicontainer-events.sock"
+  fi
   # bash内からCodexを直接起動する場合にも、起動時に選んだモードを引き継ぐ。
   extra_env="$extra_env -e AICONTAINER_CODEX_MODE=$config_codex_mode"
 

@@ -41,6 +41,8 @@ cp .bash_ai_container ~/.bash_ai_container
 echo 'if [ -f ~/.bash_ai_container ]; then . ~/.bash_ai_container; fi' >> ~/.bashrc
 ```
 
+PoppyのWSLターミナルでは、Poppyが用意した`AICONTAINER_EVENT_SOCKET`を`aicontainer`が自動検出し、ソケットだけをコンテナへ渡します。対応するPoppy hookを導入すれば、`.aicontainer`への通知用URL・セッションID・IP許可の設定は不要です。通常のWSL内Dockerで動作し、起動プロファイルやwslcは必要ありません。ホスト側の`.bash_ai_container`を更新して読み込み直してください。この機能だけならイメージの再ビルドは不要です。
+
 再ビルドする場合:
 
 ```sh

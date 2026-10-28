@@ -3,6 +3,7 @@
 import csv
 import json
 import os
+import socket
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import subprocess
@@ -156,6 +157,7 @@ sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
         self.env = dict(os.environ, DNS_CONFIG_TEST_DIR=str(self.root),
                         OPENAI_API_KEY="", PATH=str(self.root) + os.pathsep + os.environ["PATH"])
         self.env.pop("DOCKER_API_VERSION", None)
+        self.env.pop("AICONTAINER_EVENT_SOCKET", None)
 
     def run_launcher(self, *args):
         return subprocess.run(["bash", "-c", 'source "$1"; aicontainer "${@:2}"',
@@ -164,6 +166,36 @@ sys.exit(int(os.environ.get("DNS_CONFIG_TEST_EXIT", "0")))
 
     def docker_events(self):
         return [json.loads(line) for line in (self.root / "docker-events.jsonl").read_text().splitlines()]
+
+    def test_event_socket_is_automatically_mounted_without_config_entries(self):
+        name = self.root / 'events 日本語, "quote".sock'
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as channel:
+            channel.bind(str(name))
+            self.env["AICONTAINER_EVENT_SOCKET"] = str(name)
+            # A stale config must not replace the automatically selected socket.
+            self.config.write_text("env=AICONTAINER_EVENT_SOCKET=/missing\n")
+            for command in (("codex",), ("bash",), ("dump", "codex")):
+                result = self.run_launcher(*command)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                if command[0] == "dump":
+                    result = subprocess.run(["bash"], input=result.stdout[result.stdout.index("(\n"):],
+                                            cwd=self.root, env=self.env, text=True, capture_output=True)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                args = json.loads(self.calls.read_text())["args"]
+                mounts = [next(csv.reader([args[index + 1]], strict=True))
+                          for index, arg in enumerate(args) if arg == "--mount"]
+                self.assertIn(["type=bind", "source=" + str(name), "target=/tmp/aicontainer-events.sock", "readonly"], mounts)
+                values = [args[index + 1] for index, arg in enumerate(args) if arg == "-e"]
+                self.assertEqual([value for value in values if value.startswith("AICONTAINER_EVENT_SOCKET=")][-1],
+                                 "AICONTAINER_EVENT_SOCKET=/tmp/aicontainer-events.sock")
+                self.assertFalse(any(value.startswith("POPPY_") for value in values))
+
+    def test_missing_event_socket_fails_before_docker_resources(self):
+        self.env["AICONTAINER_EVENT_SOCKET"] = str(self.root / "missing")
+        result = self.run_launcher("codex")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("通知用Unixソケット", result.stderr)
+        self.assertFalse((self.root / "docker-events.jsonl").exists())
 
     def test_codex_mode_reaches_normal_bash_and_dump_launches(self):
         for mode in ("minimal", "restricted"):
