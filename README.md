@@ -295,14 +295,12 @@ dp --cwd /path/to/current-directory dotnet test
 
 更新後は `bash install.sh main` でAIイメージを再ビルドしてAIコンテナを起動し直してください。今回の変更に伴うベースイメージやプロキシイメージの再ビルドは不要です。
 
-`dp` のソースは `docker/aicontainer/dp/` にあります。AIイメージのビルド時にGo用ステージでテスト・コンパイルし、`CGO_ENABLED=0` と `-trimpath -ldflags="-s -w"` で生成したバイナリだけを `/usr/local/bin/dp` にコピーします。Goのコンパイラやソースは実行用イメージに追加しません。
+`dp` の実装は `docker/aicontainer/docker-proxy/src/`、Goの単体テストは `docker/aicontainer/docker-proxy/test/` にあります。AIイメージのビルド時にGo用ステージでテスト・コンパイルし、`CGO_ENABLED=0` と `-trimpath -ldflags="-s -w"` で生成したバイナリだけを `/usr/local/bin/dp` にコピーします。Goのコンパイラやソースは実行用イメージに追加しません。
 
-転送処理のテストはLinux上でGoを使い、Dockerなしで実行できます。Node.jsの結合テストは、一時ディレクトリにGo版 `dp` をビルドして実行します（テストの実行にはGoとNode.jsが必要です）。
+転送処理のテストはLinux上でGoを使い、Dockerなしで実行できます。`test/run.sh` は非公開関数をテストできるように、実装と単体テストを一時ディレクトリへ集めて実行し、終了時に削除します。Node.jsの結合テストは、一時ディレクトリにGo版 `dp` をビルドして実行します（テストの実行にはGoとNode.jsが必要です）。
 
 ```sh
-cd docker/aicontainer/dp
-go test main.go terminal_linux.go main_test.go terminal_linux_test.go
-cd ../../..
+sh docker/aicontainer/docker-proxy/test/run.sh
 node --test test/test_dp.cjs
 ```
 

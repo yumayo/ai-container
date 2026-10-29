@@ -1,9 +1,9 @@
 FROM golang:1.26-alpine AS dp-builder
 WORKDIR /build
-COPY ./dp/ .
+COPY ./docker-proxy/ .
 RUN go mod init aicontainer-dp && \
-    CGO_ENABLED=0 go test ./... && \
-    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /dp .
+    CGO_ENABLED=0 sh test/run.sh && \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /dp ./src
 
 FROM yumayo-ai-base
 

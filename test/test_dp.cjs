@@ -17,7 +17,7 @@ const missing = 'aicontainer-missing-command-for-test';
 before(async () => {
   buildDir = await fs.mkdtemp(path.join(os.tmpdir(), 'dp-build-'));
   client = path.join(buildDir, 'dp');
-  const sourceDir = path.resolve(__dirname, '../docker/aicontainer/dp');
+  const sourceDir = path.resolve(__dirname, '../docker/aicontainer/docker-proxy/src');
   const result = spawnSync('go', ['build', '-trimpath', '-ldflags=-s -w', '-o', client,
     path.join(sourceDir, 'main.go'), path.join(sourceDir, 'terminal_linux.go')], {
     env: { ...process.env, CGO_ENABLED: '0' }, encoding: 'utf8',
