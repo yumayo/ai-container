@@ -4,30 +4,7 @@
 
 ## セットアップ
 
-Windows 向けに、WSL Containers の専用 VM に含まれる Docker Engine で既存の AI コンテナを起動する [`start-wsl-containers.ps1`](start-wsl-containers.ps1) を追加しました。WSL がなければ自動導入し、初回は既存 Dockerfile をビルドします。Docker Desktop や Docker Engine の手動インストールは不要です。**実験的な起動経路です。** 利用者の Windows 実環境で AI コンテナの起動を確認済みです。 内蔵 Docker の直接利用に依存します。手順と制約は [Windows / WSL Containers](docs/WSL.md) を参照してください。
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start-wsl-containers.ps1 -Workspace C:\src\my-project -Tool codex
-```
-
-アプリから起動時だけ MCP などの設定を渡す場合は、`-LaunchProfileFile` にワークスペース配下の JSON ファイルを指定できます。この引数に対応した本リポジトリの起動スクリプトが必要です。既存の `.aicontainer` や AI ツールの設定ファイルは変更しません。
-
-```powershell
-.\start-wsl-containers.ps1 -Workspace C:\src\my-project -Tool codex -LaunchProfileFile C:\src\my-project\.runtime\launch.json
-```
-
-```json
-{
-  "arguments": ["-c", "mcp_servers.example={url=\"http://192.168.1.10:3000/\",bearer_token_env_var=\"EXAMPLE_TOKEN\"}"],
-  "environment": { "EXAMPLE_TOKEN": "application-generated-secret" }
-}
-```
-
-プロファイルは既存のファイルに限り、リンク経由・ワークスペース外のパスは拒否します。`-Tool` には `claude` または `codex` を明示してください。プロファイルと起動補助を読み取り専用で渡し、コンテナ内で引数の配列と環境変数へ変換します。ファイル内容をシェルで実行したり、Docker の引数に出力したりしません。起動ログでは設定値・プロンプトを伏せ、環境変数の値は出力しません。共通システムプロンプトと既存の認証・履歴は維持します。現在のイメージが共通 CLI ラッパーに対応していれば、イメージの再ビルドは不要です。
-
-形式は上記 2 プロパティのみで、ファイルは 1 MiB 以下、引数・環境変数は各 1,000 個以下です。値は NUL を含まない文字列、環境変数名は英字または `_` で始まる英数字・`_` に限ります。通常の WSL から `.bash_ai_container` を利用する場合、プロファイルと起動補助のパスに含まれるカンマ・空白・引用符も保持します。秘密を含むファイルは呼び出し元で Git の対象外にし、AI の終了後に削除してください。プロファイルで通信許可は増えません。HTTP MCP の接続先は従来どおり `.aicontainer` の `allow-ip` / `allow-dns` で起動前に許可します。
-
-以下は従来の Docker 版の手順です。
+Docker を利用できる Linux / WSL の Bash から実行します。
 
 ```sh
 bash install.sh
@@ -41,7 +18,7 @@ cp .bash_ai_container ~/.bash_ai_container
 echo 'if [ -f ~/.bash_ai_container ]; then . ~/.bash_ai_container; fi' >> ~/.bashrc
 ```
 
-PoppyのWSLターミナルでは、Poppyが用意した`AICONTAINER_EVENT_SOCKET`を`aicontainer`が自動検出し、ソケットだけをコンテナへ渡します。対応するPoppy hookを導入すれば、`.aicontainer`への通知用URL・セッションID・IP許可の設定は不要です。通常のWSL内Dockerで動作し、起動プロファイルやwslcは必要ありません。ホスト側の`.bash_ai_container`を更新して読み込み直してください。この機能だけならイメージの再ビルドは不要です。
+PoppyのWSLターミナルでは、Poppyが用意した`AICONTAINER_EVENT_SOCKET`を`aicontainer`が自動検出し、ソケットだけをコンテナへ渡します。対応するPoppy hookを導入すれば、`.aicontainer`への通知用URL・セッションID・IP許可の設定は不要です。通常のWSL内Dockerで動作します。ホスト側の`.bash_ai_container`を更新して読み込み直してください。この機能だけならイメージの再ビルドは不要です。
 
 再ビルドする場合:
 
@@ -65,6 +42,25 @@ aicontainer bash         # .aicontainer の tool を維持して bash を起動
 ```
 
 認証情報・チャット履歴はモードごとに `.claude.local` / `.codex.local` へ分離保存されます。
+
+アプリから起動時だけ MCP などの設定を渡す場合は、JSON ファイルを `AICONTAINER_LAUNCH_PROFILE`、本リポジトリの `docker/aicontainer/launch-profile.cjs` を `AICONTAINER_LAUNCH_PROFILE_RUNNER` に指定します。プロジェクトのディレクトリで次を実行してください。既存の `.aicontainer` や AI ツールの設定ファイルは変更しません。
+
+```sh
+AICONTAINER_LAUNCH_PROFILE="$PWD/.runtime/launch.json" \
+AICONTAINER_LAUNCH_PROFILE_RUNNER="/path/to/ai-container/docker/aicontainer/launch-profile.cjs" \
+aicontainer codex
+```
+
+```json
+{
+  "arguments": ["-c", "mcp_servers.example={url=\"http://192.168.1.10:3000/\",bearer_token_env_var=\"EXAMPLE_TOKEN\"}"],
+  "environment": { "EXAMPLE_TOKEN": "application-generated-secret" }
+}
+```
+
+プロファイルと起動補助スクリプトには既存ファイルの絶対パスを指定し、`aicontainer claude` または `aicontainer codex` で起動してください。両ファイルを読み取り専用で渡し、コンテナ内で引数の配列と環境変数へ変換します。ファイル内容をシェルで実行したり、Docker の引数に出力したりしません。起動ログでは設定値・プロンプトを伏せ、環境変数の値は出力しません。共通システムプロンプトと既存の認証・履歴は維持します。現在のイメージが共通 CLI ラッパーに対応していれば、イメージの再ビルドは不要です。
+
+形式は上記 2 プロパティのみで、ファイルは 1 MiB 以下、引数・環境変数は各 1,000 個以下です。値は NUL を含まない文字列、環境変数名は英字または `_` で始まる英数字・`_` に限ります。プロファイルと起動補助のパスに含まれるカンマ・空白・引用符も保持します。秘密を含むファイルは呼び出し元で Git の対象外にし、AI の終了後に削除してください。プロファイルで通信許可は増えません。HTTP MCP の接続先は `.aicontainer` の `allow-ip` / `allow-dns` で起動前に許可します。
 
 Codex CLI の機能制限は、`.aicontainer` の `codex_mode` で切り替えられます。
 
@@ -92,7 +88,7 @@ codex_mode=restricted
 
 `codex_apps`、`codex_worktrees`、画像生成、ブラウザー操作、プラグインなどの機能は、この許可リストの対象外です。廃止済み・非推奨の互換フラグは指定対象から除きます。廃止済みのフラグは CLI が `true` と表示する場合があります。どちらのモードでも、検索・ページ取得を行う標準 Web ツールは `web_search=disabled` で無効化します。Codex では WebFetch 相当のページ取得も標準 Web ツールが提供するため、個別の WebFetch 設定はありません。
 
-モードは起動時に環境変数 `AICONTAINER_CODEX_MODE` で共通の起動ラッパーに渡すため、`aicontainer bash` 内からの直接起動や `codex exec` / `codex resume`、WSL 起動にも適用されます。認証情報・履歴・ユーザー設定は両モードで共有します。比較する際は、同じモデル・同じ依頼で新しい会話を開始してください。
+モードは起動時に環境変数 `AICONTAINER_CODEX_MODE` で共通の起動ラッパーに渡すため、`aicontainer bash` 内からの直接起動や `codex exec` / `codex resume` にも適用されます。認証情報・履歴・ユーザー設定は両モードで共有します。比較する際は、同じモデル・同じ依頼で新しい会話を開始してください。
 
 初回の反映には、ホスト側で `.bash_ai_container` を更新して `source .bash_ai_container` で読み込み直し（コピーして利用している場合はコピー先も更新）、`bash install.sh main` を実行して AIコンテナを起動し直してください。その後のモード切り替えは `.aicontainer` を変更し、AIコンテナを起動し直すだけで反映されます。
 
@@ -366,20 +362,6 @@ AIコンテナは常に外部通信用の専用ネットワークを使い、`ap
 Dockerサブネット全体を自動で許可するルールはありません。Dockerホストのゲートウェイや他コンテナも、IP許可リストの範囲に含まれていなければ拒否します。`allow-dns` と `allow-ip` の設定は起動時のコピーを読み取り専用で渡すため、実行中にワークスペースの `.aicontainer` を編集しても許可先は増えません。
 
 ## アンインストール
-
-Windows / WSL Containers 版は、AI を終了してから次を実行します。WSL 本体と Windows 側の作業ファイル・認証情報は保持し、現在の WSL Containers セッションの AI 用リソースを削除します。対象の詳細は [Windows / WSL Containers](docs/WSL.md#アンインストール) を参照してください。
-
-```powershell
-# 削除予定を確認
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\uninstall-wsl-containers.ps1 -WhatIf
-
-# 削除を実行
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\uninstall-wsl-containers.ps1
-```
-
-`-ExecutionPolicy Bypass` は起動する PowerShell プロセスだけに適用され、システムの実行ポリシーは変更しません。
-
-従来の Docker 版は次を実行します。
 
 ```sh
 bash uninstall.sh

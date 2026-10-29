@@ -43,7 +43,7 @@
 #   その他のfeatureはCLIの既定値・ユーザー設定を維持します。
 #   許可リスト導入前と同じ制限で、起動前の features list は実行しません。
 # 両モードとも web_search=disabled。認証情報・履歴・ユーザー設定は共有します。
-# bash内でのCodex直接起動、codex exec / resume、WSL起動にも適用されます。
+# bash内でのCodex直接起動、codex exec / resumeにも適用されます。
 # codex_mode=minimal
 # codex_mode=restricted
 
